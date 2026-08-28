@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from app.core.cookie_store import cookie_store
-from app.models.course import CourseCategory, CourseFilter, SelectCourseRequest
+from app.models.course import CancelCourseRequest, CourseCategory, CourseFilter, SelectCourseRequest
 from app.services.course_service import course_service
 from app.services.filter_service import filter_service
 
@@ -42,3 +42,9 @@ async def filter_courses(session_id: str, category: CourseCategory, flt: CourseF
 async def select_course(session_id: str, req: SelectCourseRequest) -> dict:
     _require(session_id)
     return await course_service.select(session_id, req.course_id, req.category, req.weeks)
+
+
+@router.post("/cancel")
+async def cancel_course(session_id: str, req: CancelCourseRequest) -> dict:
+    _require(session_id)
+    return await course_service.cancel(session_id, req.course_id, req.category, req.chooser_id)

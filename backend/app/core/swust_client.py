@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -13,10 +14,12 @@ class SwustClient:
 
     每次请求根据 session_id 从本地 cookie 存储加载 cookie，
     请求结束后将响应中更新的 cookie 回写存储以续期。
+
+    用同步 Client + asyncio.to_thread：httpx AsyncClient 的 async TLS 在 atrust 下握手失败。
     """
 
     def __init__(self) -> None:
-        self._client = httpx.AsyncClient(
+        self._client = httpx.Client(
             timeout=settings.http_timeout,
             follow_redirects=True,
             verify=False,
@@ -29,7 +32,7 @@ class SwustClient:
         )
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        await asyncio.to_thread(self._client.close)
 
     def _load_flat_cookies(self, session_id: str) -> dict[str, str]:
         store = cookie_store.get_cookies(session_id)
@@ -59,13 +62,13 @@ class SwustClient:
 
     async def get(self, session_id: str, url: str, **kwargs: Any) -> httpx.Response:
         cookies = self._load_flat_cookies(session_id)
-        resp = await self._client.get(url, cookies=cookies, **kwargs)
+        resp = await asyncio.to_thread(self._client.get, url, cookies=cookies, **kwargs)
         self._merge_response_cookies(session_id, resp)
         return resp
 
     async def post(self, session_id: str, url: str, **kwargs: Any) -> httpx.Response:
         cookies = self._load_flat_cookies(session_id)
-        resp = await self._client.post(url, cookies=cookies, **kwargs)
+        resp = await asyncio.to_thread(self._client.post, url, cookies=cookies, **kwargs)
         self._merge_response_cookies(session_id, resp)
         return resp
 

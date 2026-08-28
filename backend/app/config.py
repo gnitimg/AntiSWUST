@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     swust_cas_login_url: str = "https://cas.swust.edu.cn/authserver/login"
     swust_cas_captcha_url: str = "https://cas.swust.edu.cn/authserver/captcha"
     swust_cas_getkey_url: str = "https://cas.swust.edu.cn/authserver/getKey"
-    swust_cas_callback_url: str = "http://cas.swust.edu.cn/authserver/callback"
+    swust_cas_callback_url: str = "https://cas.swust.edu.cn/authserver/callback"
 
     # 教务系统（真实地址，CFM 老系统）
     swust_dean_base_url: str = "https://matrix.dean.swust.edu.cn/acadmicManager/index.cfm"

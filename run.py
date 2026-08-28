@@ -15,6 +15,7 @@ import threading
 import atexit
 import shutil
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 BACKEND_DIR = ROOT / "backend"
@@ -121,18 +122,20 @@ def _ensure_frontend_deps(npm: str) -> bool:
 
 
 def _spawn(cmd: list[str], cwd: Path, tag: str, color: str) -> subprocess.Popen:
-    flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(cwd),
-        env=os.environ.copy(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=flags,
-    )
+    kwargs: dict[str, Any] = {
+        "cwd": str(cwd),
+        "env": os.environ.copy(),
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(cmd, **kwargs)
     _procs.append(proc)
     threading.Thread(target=_stream, args=(proc, tag, color), daemon=True).start()
     return proc

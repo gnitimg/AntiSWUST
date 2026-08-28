@@ -45,6 +45,12 @@ export interface SelectCourseRequest {
   weeks?: number[] | null
 }
 
+export interface CancelCourseRequest {
+  course_id: string
+  category: CourseCategoryValue
+  chooser_id?: string
+}
+
 export const CATEGORY_LABELS: Record<CourseCategoryValue, string> = {
   pe: '体育课',
   general: '全校通选课',

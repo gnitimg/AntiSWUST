@@ -68,3 +68,9 @@ class SelectCourseRequest(BaseModel):
     course_id: str
     category: CourseCategory
     weeks: list[int] | None = None
+
+
+class CancelCourseRequest(BaseModel):
+    course_id: str
+    category: CourseCategory
+    chooser_id: str = ""
