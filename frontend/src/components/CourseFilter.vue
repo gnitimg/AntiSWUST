@@ -18,7 +18,7 @@ const form = reactive<CourseFilter>({
   node: props.modelValue.node ?? null,
   weeks: props.modelValue.weeks ?? null,
   min_remaining: props.modelValue.min_remaining ?? null,
-  only_available: props.modelValue.only_available ?? true,
+  only_available: props.modelValue.only_available ?? false,
 })
 
 const weekOptions = Array.from({ length: 25 }, (_, i) => ({ label: `第${i + 1}周`, value: i + 1 }))
@@ -41,7 +41,7 @@ function onReset() {
   form.node = null
   form.weeks = null
   form.min_remaining = null
-  form.only_available = true
+  form.only_available = false
   sync()
   emit('reset')
 }

@@ -70,17 +70,21 @@ class CourseService:
         resp = await swust_client.get(session_id, list_url)
         tid = self._extract_tid(resp.text)
         courses = self._parse_course_list(resp.text, category, ct)
-        # 并行抓取教学班详情（限制 40 并发）
-        sem = asyncio.Semaphore(40)
+        # 并行抓取教学班详情（限制 5 并发，避免教务系统限流）
+        sem = asyncio.Semaphore(5)
 
         async def fetch_one(course: CourseOption) -> list[CourseOption]:
             async with sem:
-                try:
-                    return await self._fetch_class_details(
-                        session_id, category, course.course_id, tid, course.name, course.credit
-                    )
-                except Exception:
-                    return [course]
+                for attempt in range(3):
+                    try:
+                        return await self._fetch_class_details(
+                            session_id, category, course.course_id, tid,
+                            course.name, course.credit, bool(course.raw.get("checked")),
+                        )
+                    except Exception:
+                        if attempt < 2:
+                            await asyncio.sleep(1.0)
+                return [course]
 
         gathered = await asyncio.gather(*(fetch_one(c) for c in courses))
         results: list[CourseOption] = []
@@ -100,7 +104,7 @@ class CourseService:
 
     async def _fetch_class_details(
         self, session_id: str, category: CourseCategory, cid: str, tid: str = "",
-        course_name: str = "", course_credit: float = 0.0,
+        course_name: str = "", course_credit: float = 0.0, is_checked: bool = False,
     ) -> list[CourseOption]:
         task = CATEGORY_TASK[category]
         url = settings.swust_dean_base_url
@@ -113,8 +117,9 @@ class CourseService:
             params={"event": f"chooseCourse:{task['table_api']}"},
             data=data,
             headers=CHOOSE_HEADERS,
+            timeout=30.0,
         )
-        return self._parse_class_table(resp.text, category, cid, course_name, course_credit)
+        return self._parse_class_table(resp.text, category, cid, course_name, course_credit, is_checked)
 
     async def select(
         self, session_id: str, course_id: str, category: CourseCategory, weeks: list[int] | None = None
@@ -209,6 +214,8 @@ class CourseService:
                 credit = float(credit_str)
             except ValueError:
                 credit = 0.0
+            trigger_class = item.css(".trigger::attr(class)").get() or ""
+            is_checked = "checked" in trigger_class
             options.append(
                 CourseOption(
                     course_id=cid,
@@ -216,7 +223,7 @@ class CourseService:
                     name=name.strip(),
                     category=category,
                     credit=credit,
-                    raw={"cid": cid, "ct": ct},
+                    raw={"cid": cid, "ct": ct, "checked": is_checked},
                 )
             )
         return options
@@ -224,7 +231,7 @@ class CourseService:
     @staticmethod
     def _parse_class_table(
         html: str, category: CourseCategory, cid: str,
-        course_name: str = "", course_credit: float = 0.0,
+        course_name: str = "", course_credit: float = 0.0, is_checked: bool = False,
     ) -> list[CourseOption]:
         """解析教学班表格 .editRows，提取选课参数与时间信息。
 
@@ -238,17 +245,33 @@ class CourseService:
         headers = sel.css("thead td::text").getall()
         options: list[CourseOption] = []
         for row in rows:
-            href = row.css("a::attr(href)").get()
+            choose_href = row.css("a[href*='chooseCourse']::attr(href)").get()
+            remove_href = row.css("a[href*='removeTask']::attr(href)").get()
+            stat_class = row.css("span.stat::attr(class)").get() or ""
+            stat_title = row.css("span.stat::attr(title)").get() or ""
+
             # 用 xpath string() 提取每个 td 的所有文本（含嵌套 span 内文本）
             all_tds = [td.xpath("string()").get().strip() for td in row.css("td")]
             # 第一个 td 是状态列（无表头），跳过；剩余与 headers 对齐
             data_tds = all_tds[1:] if len(all_tds) > len(headers) else all_tds
-            status = "已满" if not href else "可选"
+
+            # 状态判断：chooseCourse 链接→可选，stat on→已选，stat peoples→已满
+            if choose_href:
+                status = "可选"
+            elif remove_href:
+                status = "已选"
+            elif "on" in stat_class.split():
+                status = "已选"
+            elif "checked" in stat_class or "已选" in stat_title:
+                status = "已选"
+            else:
+                status = "已满"
+
             info: dict[str, Any] = dict(zip(headers, data_tds))
             info["状态"] = status
 
             option = CourseOption(
-                course_id=cid,
+                course_id=f"{cid}_{info.get('课序号', '')}",
                 course_code=info.get("课序号", ""),
                 name=course_name,
                 category=category,
@@ -269,19 +292,28 @@ class CourseService:
                     option.selected_count = max(0, option.capacity - remaining)
                 except ValueError:
                     pass
-            elif seat_str == "-/-":
+            elif seat_str == "-/-" and status == "已满":
                 option.selected_count = option.capacity
 
-            if href:
-                cleaned = href.replace(" ", "")
-                # chooseCourse('CID','CIDX','TID','TT','TSK','ST')
+            # 提取选课参数
+            if choose_href:
+                cleaned = choose_href.replace(" ", "")
                 m = re.search(r"chooseCourse\((.+)\)", cleaned)
                 if m:
                     args = [a.strip("'") for a in m.group(1).split("','")]
                     if len(args) >= 6:
-                        # 编码为 CID|CIDX|TID|TT|TSK|ST 供选课接口使用
                         option.course_id = "|".join(args[:6])
                         option.raw["choose_args"] = args[:6]
+
+            # 提取退课参数 removeTask(chooserId, courseId, courseIdx, termId, taskType, taskId, hash)
+            if remove_href:
+                cleaned = remove_href.replace(" ", "")
+                m = re.search(r"removeTask\((.+)\)", cleaned)
+                if m:
+                    args = [a.strip("'") for a in m.group(1).split("','")]
+                    if len(args) >= 1:
+                        option.raw["chooser_id"] = args[0]
+                        option.raw["cancel_args"] = args
 
             # 解析上课时间（如 "周一第二讲"）
             time_str = info.get("上课时间", "")

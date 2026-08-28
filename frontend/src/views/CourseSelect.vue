@@ -14,7 +14,7 @@ const auth = useAuthStore()
 const courseStore = useCourseStore()
 
 const activeCategory = ref<CourseCategoryValue>('pe')
-const flt = ref<FilterModel>({ only_available: true })
+const flt = ref<FilterModel>({ only_available: false })
 const hasFiltered = ref(false)
 
 const categoryTabs = computed(() =>
@@ -22,8 +22,21 @@ const categoryTabs = computed(() =>
 )
 
 const displayItems = computed<CourseOption[]>(() => {
-  if (hasFiltered.value) return courseStore.filterResult
-  return courseStore.grouped[activeCategory.value] ?? []
+  let items: CourseOption[]
+  if (hasFiltered.value) {
+    items = courseStore.filterResult
+  } else {
+    items = courseStore.grouped[activeCategory.value] ?? []
+  }
+  // 前端实时筛选（无需点击按钮）
+  const f = flt.value
+  return items.filter((c) => {
+    if (f.only_available && c.capacity - c.selected_count <= 0) return false
+    if (f.name && f.name.trim() && !c.name.includes(f.name.trim())) return false
+    if (f.teacher && f.teacher.trim() && !c.teacher.includes(f.teacher.trim())) return false
+    if (f.campus && f.campus.trim() && !c.campus.includes(f.campus.trim())) return false
+    return true
+  })
 })
 
 async function onSearch() {

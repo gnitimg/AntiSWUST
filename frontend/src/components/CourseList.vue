@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Modal, message } from 'ant-design-vue'
 import type { TableColumnsType } from 'ant-design-vue'
-import { selectCourse } from '@/api/course'
+import { selectCourse, cancelCourse } from '@/api/course'
 import type { CourseCategoryValue, CourseOption } from '@/api/types'
 import { CATEGORY_LABELS, WEEKDAY_LABELS } from '@/api/types'
 
@@ -57,6 +57,23 @@ function onConfirm(option: CourseOption) {
     },
   })
 }
+
+function onCancel(option: CourseOption) {
+  const chooserId = (option.raw as Record<string, string>)?.['chooser_id'] || ''
+  Modal.confirm({
+    title: '确认退课',
+    content: `将退选《${option.name}》-${option.teacher}（${CATEGORY_LABELS[props.category]}）`,
+    okType: 'danger',
+    onOk: async () => {
+      try {
+        await cancelCourse({ course_id: option.course_id, category: props.category, chooser_id: chooserId })
+        message.success('退课请求已提交')
+      } catch {
+        message.error('退课失败，请重试')
+      }
+    },
+  })
+}
 </script>
 
 <template>
@@ -71,9 +88,17 @@ function onConfirm(option: CourseOption) {
     <template #bodyCell="{ column, record }">
       <template v-if="column.key === 'action'">
         <a-button
+          v-if="(record as CourseOption).raw['状态'] === '已选'"
           type="link"
           size="small"
-          :disabled="!(record as CourseOption).course_id.includes('|')"
+          danger
+          @click="onCancel(record as CourseOption)"
+        >退课</a-button>
+        <a-button
+          v-else
+          type="link"
+          size="small"
+          :disabled="(record as CourseOption).raw['状态'] === '已满'"
           @click="onConfirm(record as CourseOption)"
         >选课</a-button>
       </template>
