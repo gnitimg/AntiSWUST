@@ -29,17 +29,18 @@
 
 教务系统 `matrix.dean.swust.edu.cn` 的 `chooseCourse` 事件：
 
-| 课程类型 | task_type | task_name | 说明 |
-| --- | --- | --- | --- |
-| 体育课 | `sportTask` | `SportTask` | 已确认 |
-| 全校通选课 | `commonTask` | `CommonTask` | 已确认 |
-| 专业限选课 | `programTask` | `PlanTask` | 已确认 |
-| 补选低年级 | `programTask` | `PlanTask` | 复用，CT 轮次需按学期调整 |
-| 重修 | `programTask` | `PlanTask` | 复用，CT 轮次需按学期调整 |
+| 课程类型 | task_type | table_api（教学班） | choose_api（选课） | 说明 |
+| --- | --- | --- | --- | --- |
+| 体育课 | `sportTask` | `apiSportTaskTable` | `apiChooseSportTask` | 已实测 |
+| 全校通选课 | `commonTask` | `apiCommonTaskTable` | `apiChooseCommonTask` | 已实测 |
+| 专业限选课 | `programTask` | `apiPlanTaskTable` | `apiChoosePlanTask` | 已实测 |
+| 补选低年级 | `fixupTask` | `apiFixupPlanTaskTable` | `apiFixupPlanTask`（无 Choose 前缀） | 已实测 |
+| 重修 | `retakeTask` | `apiRetakePlanTaskTable` | `apiRetakePlanTask`（无 Choose 前缀） | 已实测 |
 
 - **课程列表**：`GET ?event=chooseCourse:{task_type}&CT={轮次}` → 解析 `.courseShow`（`.name` + `.trigger[cid]`）
-- **教学班详情**：`POST ?event=chooseCourse:api{task_name}Table`，body `CID=xxx` → 解析 `.editRows`，从 `chooseCourse('CID','CIDX','TID','TT','TSK','ST')` 提取选课参数
-- **提交选课**：`POST ?event=chooseCourse:apiChoose{task_name}`，body `{CT,TID,CID,CIDX,TSK,TT,ST,seed[,CP=2]}`，返回 `{success: bool}`
+- **教学班详情**：`POST ?event=chooseCourse:{table_api}`，body `TID/CID/seed` → 解析 `.editRows`，从 `chooseCourse('CID','CIDX','TID','TT','TSK','ST')` 提取选课参数
+- **提交选课**：`POST ?event=chooseCourse:{choose_api}`，body `{CT,TID,CID,CIDX,TSK,TT,ST,seed[,CP=2]}`，返回 `{success: bool}`
+- **取消选课**：`POST ?event=chooseCourse:apiCancelTask`（五类统一），body 同选课 + `SCC={chooserId}`
 
 ## 架构
 
