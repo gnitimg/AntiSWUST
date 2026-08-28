@@ -51,6 +51,9 @@ backend/.env
 *.log
 logs/
 
+# 抓包记录（含完整请求/响应，可能含敏感 cookie，绝不提交）
+captures/
+
 # ===== IDE / 编辑器 =====
 .vscode/
 .idea/
