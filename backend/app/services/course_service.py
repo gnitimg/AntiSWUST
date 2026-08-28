@@ -51,18 +51,27 @@ CHOOSE_HEADERS = {
 class CourseService:
     """选课数据抓取与解析服务（对接 matrix.dean.swust.edu.cn 真实接口）。"""
 
+    _cache: dict[tuple[str, str], tuple[float, list[CourseOption]]] = {}
+    _cache_ttl: float = 60.0
+
     def _ct(self, category: CourseCategory) -> int:
         return CATEGORY_CT_OVERRIDE.get(category, settings.choose_course_ct)
 
     async def fetch_category(self, session_id: str, category: CourseCategory) -> list[CourseOption]:
+        # 短期缓存：60 秒内同一 session+分类直接返回缓存
+        cache_key = (session_id, category.value)
+        cached = self._cache.get(cache_key)
+        if cached and time.time() - cached[0] < self._cache_ttl:
+            return cached[1]
+
         task = CATEGORY_TASK[category]
         ct = self._ct(category)
         list_url = f"{settings.swust_dean_base_url}?event=chooseCourse:{task['task_type']}&CT={ct}"
         resp = await swust_client.get(session_id, list_url)
         tid = self._extract_tid(resp.text)
         courses = self._parse_course_list(resp.text, category, ct)
-        # 并行抓取教学班详情（限制 20 并发，避免请求堆积）
-        sem = asyncio.Semaphore(20)
+        # 并行抓取教学班详情（限制 40 并发）
+        sem = asyncio.Semaphore(40)
 
         async def fetch_one(course: CourseOption) -> list[CourseOption]:
             async with sem:
@@ -77,6 +86,7 @@ class CourseService:
         results: list[CourseOption] = []
         for classes in gathered:
             results.extend(classes)
+        self._cache[cache_key] = (time.time(), results)
         return results
 
     async def fetch_all(self, session_id: str) -> dict[CourseCategory, list[CourseOption]]:
