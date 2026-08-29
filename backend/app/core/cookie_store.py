@@ -75,7 +75,8 @@ class CookieStore:
         except (json.JSONDecodeError, OSError):
             return None
         now = int(time.time())
-        if now - record.get("last_access", 0) > self.ttl:
+        # ttl <= 0 表示暂不限制登录态时长（见 config.cookie_ttl_seconds 注释）
+        if self.ttl > 0 and now - record.get("last_access", 0) > self.ttl:
             self.delete(session_id)
             return None
         record["last_access"] = now
@@ -105,6 +106,8 @@ class CookieStore:
             pass
 
     def cleanup_expired(self) -> int:
+        if self.ttl <= 0:
+            return 0
         now = int(time.time())
         removed = 0
         for path in self.store_dir.glob("*.json"):

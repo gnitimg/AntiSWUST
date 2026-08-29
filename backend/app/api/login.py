@@ -23,6 +23,7 @@ class StatusResponse(BaseModel):
     status: str
     session_id: str
     user: dict = {}
+    detail: str = ""
 
 
 @router.get("/qrcode", response_model=QRCodeResponse)
@@ -48,7 +49,7 @@ async def login_status(session_id: str, ticket: str) -> StatusResponse:
         cookie_store.save(session_id, result.cookies, result.user)
         return StatusResponse(status="success", session_id=session_id, user=result.user)
     if result.message in ("expired", "scanned", "network_error"):
-        return StatusResponse(status=result.message, session_id=session_id)
+        return StatusResponse(status=result.message, session_id=session_id, detail=result.detail)
     return StatusResponse(status="waiting", session_id=session_id)
 
 

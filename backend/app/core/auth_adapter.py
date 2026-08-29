@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ class LoginResult:
     cookies: dict[str, dict[str, Any]] = field(default_factory=dict)
     user: dict[str, Any] = field(default_factory=dict)
     message: str = ""
+    detail: str = ""
 
 
 class AuthAdapter:
@@ -57,9 +59,35 @@ class AuthAdapter:
             },
         )
         self._last_wx_code: str = ""
+        self._load_jar()
 
     async def aclose(self) -> None:
         await asyncio.to_thread(self._client.close)
+
+    def _save_jar(self) -> None:
+        """把当前 cookie jar 持久化到文件，uvicorn --reload/重启后恢复，避免已扫码用户重新登录。"""
+        try:
+            cookies = [
+                {"name": c.name, "value": c.value or "", "domain": c.domain or "", "path": c.path or "/"}
+                for c in self._client.cookies.jar
+            ]
+            tmp = settings.auth_jar_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(cookies, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(settings.auth_jar_path)
+        except OSError:
+            pass
+
+    def _load_jar(self) -> None:
+        try:
+            cookies = json.loads(settings.auth_jar_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            return
+        for c in cookies:
+            try:
+                self._client.cookies.set(c.get("name", ""), c.get("value", ""),
+                                         domain=c.get("domain") or "", path=c.get("path") or "/")
+            except Exception:
+                continue
 
     async def _get(self, url: str, **kwargs: Any) -> httpx.Response:
         return await asyncio.to_thread(self._client.get, url, **kwargs)
@@ -76,10 +104,15 @@ class AuthAdapter:
         dean_service_url = (
             f"{settings.swust_dean_base_url}?event={settings.swust_dean_portal_event}"
         )
-        await self._get(
-            settings.swust_cas_login_url,
-            params={"service": dean_service_url},
-        )
+        try:
+            await self._get(
+                settings.swust_cas_login_url,
+                params={"service": dean_service_url},
+                timeout=httpx.Timeout(30.0, connect=5.0),
+            )
+        except httpx.HTTPError:
+            # 预访问失败不中断：session cookie 可能仍可用（jar 持久化/上次登录残留）
+            pass
 
         params = {
             "appid": settings.wx_open_appid,
@@ -97,6 +130,7 @@ class AuthAdapter:
         img_resp = await self._get(img_url)
         image_base64 = base64.b64encode(img_resp.content).decode()
         expire_at = time.time() + settings.swust_qrcode_timeout
+        self._save_jar()
         return QRCodeInfo(ticket=uuid, image_base64=image_base64, expire_at=expire_at)
 
     async def poll_status(self, ticket: str) -> LoginResult:
@@ -129,77 +163,68 @@ class AuthAdapter:
             return LoginResult(False, message="waiting")
         self._last_wx_code = wx_code
 
-        # 已确认，后续需访问校内服务器（cas / matrix），未连校园网/atrust 会失败
-        import traceback as _tb
-        _dbg = open("/tmp/auth_debug.log", "a", encoding="utf-8")
-        def _d(msg: str) -> None:
-            line = f"[{time.strftime('%H:%M:%S')}] {msg}"
-            print(line, flush=True)
-            _dbg.write(line + "\n"); _dbg.flush()
+        # 已确认，后续需访问校内服务器（cas / matrix），未连校园网/atrust 会失败。
+        # 注意：教务门户页渲染很慢（实测 >15s 会 ReadTimeout），但此时 SSO cookie 已随
+        # 重定向链写入 jar——门户页抓取一律 best-effort，成功判据是 jar 里有教务域 cookie。
+        dean_service_url = (
+            f"{settings.swust_dean_base_url}?event={settings.swust_dean_portal_event}"
+        )
+        home_url = dean_service_url
+        step_timeout = httpx.Timeout(30.0, connect=5.0)
+        detail = ""
+
         try:
-            dean_service_url = (
-                f"{settings.swust_dean_base_url}?event={settings.swust_dean_portal_event}"
-            )
+            # step1: CAS 回调换取认证 cookie（TGC）。
+            # 该请求会 302 到 soa 门户并可能返回 403 页面，属正常；票据一次性，失败不可重试。
+            try:
+                await self._get(
+                    f"{settings.swust_cas_callback_url}?code={wx_code}&store=",
+                    headers={
+                        "Referer": "https://open.weixin.qq.com/",
+                        "Upgrade-Insecure-Requests": "1",
+                    },
+                    timeout=step_timeout,
+                )
+            except httpx.HTTPError as e:
+                detail = f"CAS 回调失败: {type(e).__name__}"
+                print(f"[auth] {detail}（继续，TGC 可能已随重定向写入 jar）", flush=True)
 
-            # 请求 CAS 回调换取认证 cookie
-            callback_url = f"{settings.swust_cas_callback_url}?code={wx_code}&store="
-            _d(f"step1 请求 callback: {callback_url[:80]}")
-            _d(f"  client jar cookies: {list(self._client.cookies.jar)}")
-            cb_resp = await self._get(
-                callback_url,
-                headers={
-                    "Referer": "https://open.weixin.qq.com/",
-                    "Upgrade-Insecure-Requests": "1",
-                },
-            )
-            _d(f"step1 done status={cb_resp.status_code} url={str(cb_resp.url)[:80]}")
-            _d(f"  history: {[str(r.url)[:60] for r in cb_resp.history]}")
-            _d(f"  resp.cookies: {dict(cb_resp.cookies)}")
-            _d(f"  body head 300: {cb_resp.text[:300]}")
+            # step2: 用 TGC 换教务票据 + 教务 SSO cookie（重定向到 matrix 门户，页面慢）
+            try:
+                dean_resp = await self._get(
+                    settings.swust_cas_login_url,
+                    params={"service": dean_service_url},
+                    timeout=step_timeout,
+                )
+            except httpx.HTTPError as e:
+                dean_resp = None
+                detail = detail or f"教务门户跳转失败: {type(e).__name__}"
+                print(f"[auth] 教务门户跳转异常: {type(e).__name__}: {e}（继续，检查 jar）", flush=True)
 
-            # 访问教务门户，用 service 参数触发 CAS 票据换发，换取教务 cookie
-            _d(f"step2 请求 dean_login: {settings.swust_cas_login_url}")
-            dean_resp = await self._get(
-                settings.swust_cas_login_url,
-                params={"service": dean_service_url},
-            )
-            _d(f"step2 done status={dean_resp.status_code} url={str(dean_resp.url)[:80]}")
-            _d(f"  history: {[str(r.url)[:60] for r in dean_resp.history]}")
-            _d(f"  resp.cookies: {dict(dean_resp.cookies)}")
+            # step3: 若已到教务首页，再抓一次确保教务 cookie 齐全（best-effort，超时不影响）
+            if dean_resp is not None and "matrix.dean.swust.edu.cn" in str(dean_resp.url):
+                try:
+                    await self._get(home_url, timeout=step_timeout)
+                except httpx.HTTPError:
+                    pass
 
-            # 从整个 client cookie jar 提取（包含重定向链中所有 302 设置的 cookie）
+            # 成功判据：jar 中存在教务系统域的 cookie（SSO，domain=.dean.swust.edu.cn）
             all_cookies = self._extract_all_cookies()
-            _d(f"  all_cookies domains: {list(all_cookies.keys())}")
+            dean_cookies = {d: c for d, c in all_cookies.items() if "dean.swust.edu.cn" in d}
+            if not dean_cookies:
+                detail = detail or "未获取到教务系统会话 cookie"
+                print(f"[auth] 登录失败: {detail}", flush=True)
+                return LoginResult(False, message="network_error", detail=detail)
 
-            # 若被重定向到教务首页，再抓一次确保拿到教务 cookie
-            if "matrix.dean.swust.edu.cn" in str(dean_resp.url):
-                home_url = f"{settings.swust_dean_base_url}?event={settings.swust_dean_portal_event}"
-                _d(f"step3 请求 home: {home_url[:80]}")
-                home_resp = await self._get(home_url)
-                _d(f"step3 done status={home_resp.status_code} resp.cookies: {dict(home_resp.cookies)}")
-                all_cookies = self._extract_all_cookies()
-                _d(f"  all_cookies domains: {list(all_cookies.keys())}")
-            else:
-                _d("step3 跳过（dean_resp 未到 matrix）")
-
-            if not all_cookies:
-                _d("!! all_cookies 为空，登录失败")
-                return LoginResult(False, message="network_error")
-
+            # 登录成功，持久化 cookie jar（--reload/重启后无需重新扫码）
+            self._save_jar()
             user = await self._fetch_user_profile(all_cookies)
-            _d(f"完成 user={user} cookie域数={len(all_cookies)}")
+            print(f"[auth] 登录成功 user={user.get('name', '')} cookie域数={len(all_cookies)}", flush=True)
             return LoginResult(True, all_cookies, user)
-        except httpx.ConnectError as e:
-            _d(f"ConnectError: {e}\n{_tb.format_exc()}")
-            return LoginResult(False, message="network_error")
-        except httpx.HTTPError as e:
-            _d(f"HTTPError {type(e).__name__}: {e}\n{_tb.format_exc()}")
-            return LoginResult(False, message="network_error")
         except Exception as e:
-            _d(f"意外异常 {type(e).__name__}: {e}\n{_tb.format_exc()}")
-            return LoginResult(False, message="network_error")
-        finally:
-            _dbg.close()
+            detail = detail or f"{type(e).__name__}: {e}"
+            print(f"[auth] 登录意外异常 {type(e).__name__}: {e}", flush=True)
+            return LoginResult(False, message="network_error", detail=detail)
 
     async def wait_for_login(self, ticket: str, timeout: int | None = None) -> LoginResult:
         timeout = timeout or settings.swust_qrcode_timeout

@@ -16,9 +16,9 @@ class CourseCategory(str, Enum):
     @property
     def label(self) -> str:
         return {
-            CourseCategory.PE: "体育课",
+            CourseCategory.PE: "体育项目",
             CourseCategory.GENERAL: "全校通选课",
-            CourseCategory.MAJOR_LIMITED: "专业限选课",
+            CourseCategory.MAJOR_LIMITED: "计划课程",
             CourseCategory.SUPPLEMENT: "补选低年级课程",
             CourseCategory.RETAKE: "重新学习（重修）",
         }[self]

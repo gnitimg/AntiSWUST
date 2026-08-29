@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import course, login
+from app.api import course, groups, login, preset, snipe
 from app.config import settings
 from app.core.auth_adapter import auth_adapter
 from app.core.swust_client import swust_client
@@ -30,6 +30,9 @@ app.add_middleware(
 
 app.include_router(login.router)
 app.include_router(course.router)
+app.include_router(snipe.router)
+app.include_router(groups.router)
+app.include_router(preset.router)
 
 
 @app.get("/api/health")

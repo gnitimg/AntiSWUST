@@ -5,11 +5,16 @@ import re
 import time
 from typing import Any
 
+import httpx
 from parsel import Selector
 
 from app.config import settings
 from app.core.swust_client import swust_client
 from app.models.course import ClassTimeSlot, CourseCategory, CourseOption
+
+
+class SessionExpiredError(RuntimeError):
+    """教务系统会话失效（请求被 302 重定向到 CAS 登录页）。"""
 
 
 # 真实选课接口映射（2026-08-28 实测，来源：Chrome DevTools Protocol 抓取五个分类列表页 JS）
@@ -20,11 +25,11 @@ from app.models.course import ClassTimeSlot, CourseCategory, CourseOption
 #   取消     event=chooseCourse:apiCancelTask (POST CT/TID/CID/CIDX/TSK/TT/ST/SCC/seed)
 # 注意：sportTask/commonTask/programTask 选课 API 带 Choose 前缀，fixupTask/retakeTask 不带。
 CATEGORY_TASK: dict[CourseCategory, dict[str, str]] = {
-    # 体育课
+    # 体育项目（体育课）
     CourseCategory.PE: {"task_type": "sportTask", "table_api": "apiSportTaskTable", "choose_api": "apiChooseSportTask"},
     # 全校通选课
     CourseCategory.GENERAL: {"task_type": "commonTask", "table_api": "apiCommonTaskTable", "choose_api": "apiChooseCommonTask"},
-    # 专业限选课（计划课程）
+    # 计划课程（专业限选）
     CourseCategory.MAJOR_LIMITED: {"task_type": "programTask", "table_api": "apiPlanTaskTable", "choose_api": "apiChoosePlanTask"},
     # 补选低年级课程
     CourseCategory.SUPPLEMENT: {"task_type": "fixupTask", "table_api": "apiFixupPlanTaskTable", "choose_api": "apiFixupPlanTask"},
@@ -47,44 +52,145 @@ CHOOSE_HEADERS = {
     "x-requested-with": "XMLHttpRequest",
 }
 
+# 表头别名 → 规范键。五个分类的教学班表头列名存在差异（如 sportTask 用"上课地点"，
+# 其他分类可能是"地点"/"教室"），按别名归一化后再映射，避免字段丢失。
+HEADER_ALIASES: dict[str, tuple[str, ...]] = {
+    "课序号": ("课序号", "序号", "教学班", "班次", "课序"),
+    "教师": ("教师", "任课教师", "老师"),
+    "人数": ("人数", "容量", "限选人数", "人数上限", "计划人数"),
+    "席位": ("席位", "余量", "剩余席位", "剩余人数"),
+    "校区": ("校区", "上课校区"),
+    "周次": ("周次", "行课周次", "上课周次"),
+    "上课时间": ("上课时间", "时间", "上课时间/节次"),
+    "上课地点": ("上课地点", "地点", "教室", "上课教室"),
+}
+
+# 中文数字（"周四第四讲" 格式）
+_CN_DIGITS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _cn_to_int(text: str) -> int | None:
+    """中文数字转整数，支持 一~十九（讲次/节次范围）。"""
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    if text == "十":
+        return 10
+    if "十" in text:
+        ten_part, one_part = text.split("十", 1)
+        tens = _CN_DIGITS.get(ten_part, 1) if ten_part else 1
+        ones = _CN_DIGITS.get(one_part, 0) if one_part else 0
+        return tens * 10 + ones
+    return _CN_DIGITS.get(text)
+
+# fetch_selected 依次尝试的分类（任一列表页都内嵌同一份已选清单，从小页到大页）
+SELECTED_FETCH_ORDER = (
+    CourseCategory.SUPPLEMENT,
+    CourseCategory.RETAKE,
+    CourseCategory.PE,
+    CourseCategory.MAJOR_LIMITED,
+    CourseCategory.GENERAL,
+)
+
 
 class CourseService:
     """选课数据抓取与解析服务（对接 matrix.dean.swust.edu.cn 真实接口）。"""
 
     _cache: dict[tuple[str, str], tuple[float, list[CourseOption]]] = {}
     _cache_ttl: float = 60.0
+    # 已选课程清单缓存（列表页内嵌，key 为 session_id）
+    _selected_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
     def _ct(self, category: CourseCategory) -> int:
         return CATEGORY_CT_OVERRIDE.get(category, settings.choose_course_ct)
 
-    async def fetch_category(self, session_id: str, category: CourseCategory) -> list[CourseOption]:
-        # 短期缓存：60 秒内同一 session+分类直接返回缓存
-        cache_key = (session_id, category.value)
-        cached = self._cache.get(cache_key)
-        if cached and time.time() - cached[0] < self._cache_ttl:
-            return cached[1]
+    @staticmethod
+    def _ensure_not_login_page(resp: Any) -> None:
+        """教务 session 失效时请求会被 302 到 CAS 登录页（follow_redirects 后 resp.url 变为 cas）。"""
+        url = str(getattr(resp, "url", ""))
+        if "authserver/login" in url or ("cas.swust.edu.cn" in url and "matrix.dean" not in url):
+            raise SessionExpiredError("教务系统会话已失效，请重新登录")
+
+    def invalidate(self, session_id: str) -> None:
+        """选课/退课提交后清除该 session 的全部缓存，下次抓取拿到最新状态。"""
+        for key in [k for k in self._cache if k[0] == session_id]:
+            self._cache.pop(key, None)
+        self._selected_cache.pop(session_id, None)
+
+    async def fetch_category(
+        self, session_id: str, category: CourseCategory, force: bool = False, basic: bool = False
+    ) -> list[CourseOption]:
+        """抓取分类课程。
+
+        basic=True 时只解析列表页（课程级信息：名称/学分/锁定/已选，约 1 秒返回），
+        供前端先渲染再异步补齐教学班详情；basic 与 full 结果分开缓存。
+        """
+        # 短期缓存：60 秒内同一 session+分类直接返回缓存（force=True 跳过）
+        cache_key = (session_id, f"{category.value}:{'basic' if basic else 'full'}")
+        if not force:
+            cached = self._cache.get(cache_key)
+            if cached and time.time() - cached[0] < self._cache_ttl:
+                return cached[1]
 
         task = CATEGORY_TASK[category]
         ct = self._ct(category)
         list_url = f"{settings.swust_dean_base_url}?event=chooseCourse:{task['task_type']}&CT={ct}"
-        resp = await swust_client.get(session_id, list_url)
+        # 列表页偶发超时（会话锁排队/网络抖动），重试一次
+        resp: httpx.Response | None = None
+        last_err: Exception | None = None
+        for attempt in range(2):
+            try:
+                resp = await swust_client.get(session_id, list_url)
+                break
+            except httpx.HTTPError as e:
+                last_err = e
+                if attempt == 0:
+                    await asyncio.sleep(0.8)
+        if resp is None:
+            raise last_err if last_err is not None else RuntimeError("列表页请求失败")
+        self._ensure_not_login_page(resp)
         tid = self._extract_tid(resp.text)
+        # 已选课程清单内嵌在每个列表页中，顺带解析并缓存（退课参数来源）
+        if "Choosen" in resp.text:
+            self._selected_cache[session_id] = (time.time(), self._parse_choosen_table(resp.text))
         courses = self._parse_course_list(resp.text, category, ct)
-        # 并行抓取教学班详情（限制 5 并发，避免教务系统限流）
-        sem = asyncio.Semaphore(5)
+
+        if basic:
+            # 列表页信息即可直接返回：已选/锁定状态已知，其余教学班字段待 full 阶段补齐
+            for c in courses:
+                if not c.raw.get("locked") and not c.raw.get("checked"):
+                    c.raw["状态"] = ""
+            self._cache[cache_key] = (time.time(), courses)
+            return courses
+
+        # 并行抓取教学班详情（并发数可通过 FETCH_CONCURRENCY 调整，避免教务系统限流）
+        sem = asyncio.Semaphore(settings.fetch_concurrency)
 
         async def fetch_one(course: CourseOption) -> list[CourseOption]:
+            # 锁定课程无教学班入口（trigger 被 .stat.locked 取代），跳过详情抓取
+            if course.raw.get("locked"):
+                return [course]
             async with sem:
-                for attempt in range(3):
+                for attempt in range(settings.fetch_max_attempts):
                     try:
-                        return await self._fetch_class_details(
+                        parsed = await self._fetch_class_details(
                             session_id, category, course.course_id, tid,
                             course.name, course.credit, bool(course.raw.get("checked")),
                         )
+                        # 解析结果为空通常意味着响应异常（限流页/登录页/错误页），重试
+                        if parsed:
+                            return parsed
+                    except SessionExpiredError:
+                        raise
                     except Exception:
-                        if attempt < 2:
-                            await asyncio.sleep(1.0)
-                return [course]
+                        pass
+                    if attempt < settings.fetch_max_attempts - 1:
+                        await asyncio.sleep(settings.fetch_retry_delay)
+            # 重试耗尽：保留基本信息行并标记，前端禁用其选课按钮
+            course.raw["detail_failed"] = True
+            course.raw["状态"] = "详情未加载"
+            return [course]
 
         gathered = await asyncio.gather(*(fetch_one(c) for c in courses))
         results: list[CourseOption] = []
@@ -102,6 +208,39 @@ class CourseService:
                 result[category] = []
         return result
 
+    async def fetch_selected(self, session_id: str, force: bool = False) -> list[dict[str, Any]]:
+        """获取已选课程清单（含退课所需 chooser_id 等参数）。
+
+        已选清单内嵌在每个分类列表页的 div#Choosen 中，优先用缓存；
+        缓存未命中时从小到大依次请求列表页解析。
+        """
+        cached = self._selected_cache.get(session_id)
+        if cached and not force and time.time() - cached[0] < self._cache_ttl:
+            return cached[1]
+
+        last_err: Exception | None = None
+        for category in SELECTED_FETCH_ORDER:
+            task = CATEGORY_TASK[category]
+            url = f"{settings.swust_dean_base_url}?event=chooseCourse:{task['task_type']}&CT={self._ct(category)}"
+            try:
+                resp = await swust_client.get(session_id, url)
+                self._ensure_not_login_page(resp)
+            except SessionExpiredError:
+                raise
+            except Exception as e:
+                last_err = e
+                continue
+            if "Choosen" not in resp.text:
+                # 异常页面（无已选清单容器），尝试下一个分类
+                continue
+            items = self._parse_choosen_table(resp.text)
+            self._selected_cache[session_id] = (time.time(), items)
+            return items
+
+        if last_err is not None:
+            raise last_err
+        raise SessionExpiredError("无法获取已选课程清单，请重新登录")
+
     async def _fetch_class_details(
         self, session_id: str, category: CourseCategory, cid: str, tid: str = "",
         course_name: str = "", course_credit: float = 0.0, is_checked: bool = False,
@@ -117,8 +256,9 @@ class CourseService:
             params={"event": f"chooseCourse:{task['table_api']}"},
             data=data,
             headers=CHOOSE_HEADERS,
-            timeout=30.0,
+            timeout=settings.fetch_detail_timeout,
         )
+        self._ensure_not_login_page(resp)
         return self._parse_class_table(resp.text, category, cid, course_name, course_credit, is_checked)
 
     async def select(
@@ -129,7 +269,7 @@ class CourseService:
         # course_id 编码为 CID|CIDX|TID|TT|TSK|ST（由前端从列表回传）
         parts = course_id.split("|")
         if len(parts) < 6:
-            return {"success": False, "message": "course_id 编码不合法"}
+            return {"success": False, "reason": "教学班详情未加载，无法提交（请刷新列表重试）"}
         cid, cidx, tid, tt, tsk, st = parts[:6]
         data: dict[str, Any] = {
             "CT": str(ct),
@@ -152,22 +292,28 @@ class CourseService:
             headers=CHOOSE_HEADERS,
         )
         try:
-            return resp.json()
+            result = resp.json()
         except Exception:
-            return {"success": False, "message": resp.text[:200]}
+            result = {"success": False, "reason": resp.text[:200]}
+        if result.get("success"):
+            self.invalidate(session_id)
+        return result
 
     async def cancel(
         self, session_id: str, course_id: str, category: CourseCategory, chooser_id: str = ""
     ) -> dict[str, Any]:
         """取消选课（退课）。五个分类统一用 apiCancelTask。
 
-        course_id 编码: CID|CIDX|TID|TT|TSK|ST（同 select）
-        chooser_id: SCC 参数，来自已选课程表的 removeTask 调用第 1 个参数（学号+cid+termId+taskType 拼接）
+        course_id 编码: CID|CIDX|TID|TT|TSK|ST，与 chooser_id 一同来自已选课程清单
+        （列表页内嵌 div#Choosen 中 removeTask 的前 7 个实参），见 fetch_selected。
+        chooser_id: SCC 参数，形如 `5120246728,121387,261T`（学号+cid+termId+taskType）。
         """
         ct = self._ct(category)
         parts = course_id.split("|")
         if len(parts) < 6:
-            return {"success": False, "message": "course_id 编码不合法"}
+            return {"success": False, "reason": "退课参数不完整，请刷新已选课程后重试"}
+        if not chooser_id:
+            return {"success": False, "reason": "缺少退课记录标识（SCC），请刷新已选课程后重试"}
         cid, cidx, tid, tt, tsk, st = parts[:6]
         data: dict[str, Any] = {
             "CT": str(ct),
@@ -188,9 +334,12 @@ class CourseService:
             headers=CHOOSE_HEADERS,
         )
         try:
-            return resp.json()
+            result = resp.json()
         except Exception:
-            return {"success": False, "message": resp.text[:200]}
+            result = {"success": False, "reason": resp.text[:200]}
+        if result.get("success"):
+            self.invalidate(session_id)
+        return result
 
     @staticmethod
     def _extract_tid(html: str) -> str:
@@ -200,15 +349,24 @@ class CourseService:
 
     @staticmethod
     def _parse_course_list(html: str, category: CourseCategory, ct: int) -> list[CourseOption]:
-        """解析课程列表页 .courseShow。"""
+        """解析课程列表页 .courseShow。
+
+        可选课程含 .trigger（cid 属性）；已选课程 trigger 带 checked 类；
+        锁定课程无 trigger（.stat.locked 代替），从 div.courseShow 的 cid 属性取 ID 并标记置灰。
+        """
         sel = Selector(text=html)
         items = sel.css(".courseShow")
         options: list[CourseOption] = []
         for item in items:
             name = item.css(".name::text").get() or ""
             cid = item.css(".trigger::attr(cid)").get() or ""
+            locked = bool(item.css(".stat.locked"))
             if not cid:
-                continue
+                if not locked:
+                    continue
+                cid = item.attrib.get("cid") or ""
+                if not cid:
+                    continue
             credit_str = item.css(".numeric::text").get() or "0"
             try:
                 credit = float(credit_str)
@@ -216,6 +374,10 @@ class CourseService:
                 credit = 0.0
             trigger_class = item.css(".trigger::attr(class)").get() or ""
             is_checked = "checked" in trigger_class
+            raw: dict[str, Any] = {"cid": cid, "ct": ct, "checked": is_checked}
+            if locked:
+                raw["locked"] = True
+                raw["状态"] = "锁定"
             options.append(
                 CourseOption(
                     course_id=cid,
@@ -223,10 +385,24 @@ class CourseService:
                     name=name.strip(),
                     category=category,
                     credit=credit,
-                    raw={"cid": cid, "ct": ct, "checked": is_checked},
+                    raw=raw,
                 )
             )
         return options
+
+    @staticmethod
+    def _canonical_headers(headers: list[str]) -> list[str]:
+        """把教务表头列名归一化为规范键（未匹配到的保留原文）。"""
+        out: list[str] = []
+        for h in headers:
+            h = (h or "").strip()
+            canonical = h
+            for key, aliases in HEADER_ALIASES.items():
+                if h in aliases:
+                    canonical = key
+                    break
+            out.append(canonical)
+        return out
 
     @staticmethod
     def _parse_class_table(
@@ -235,14 +411,15 @@ class CourseService:
     ) -> list[CourseOption]:
         """解析教学班表格 .editRows，提取选课参数与时间信息。
 
-        表头结构（实测 sportTask）：
-          thead td: [课序号, 教师, 人数, 席位, 校区, 周次, 上课时间, 上课地点]
-          数据行第一个 td 是状态列（含 <span class="stat"> 图标，无文本，无表头）
+        表头按别名归一化（见 HEADER_ALIASES），规范键为：
+          课序号/教师/人数/席位/校区/周次/上课时间/上课地点
+        数据行第一个 td 是状态列（含 <span class="stat"> 图标，无文本，无表头）。
         用 xpath("string()") 提取每个 td 的全部文本（含嵌套 span）。
         """
         sel = Selector(text=html)
         rows = sel.css(".editRows")
-        headers = sel.css("thead td::text").getall()
+        raw_headers = sel.css("thead td::text").getall()
+        headers = CourseService._canonical_headers(raw_headers)
         options: list[CourseOption] = []
         for row in rows:
             choose_href = row.css("a[href*='chooseCourse']::attr(href)").get()
@@ -251,7 +428,7 @@ class CourseService:
             stat_title = row.css("span.stat::attr(title)").get() or ""
 
             # 用 xpath string() 提取每个 td 的所有文本（含嵌套 span 内文本）
-            all_tds = [td.xpath("string()").get().strip() for td in row.css("td")]
+            all_tds = [(td.xpath("string()").get() or "").strip() for td in row.css("td")]
             # 第一个 td 是状态列（无表头），跳过；剩余与 headers 对齐
             data_tds = all_tds[1:] if len(all_tds) > len(headers) else all_tds
 
@@ -269,6 +446,8 @@ class CourseService:
 
             info: dict[str, Any] = dict(zip(headers, data_tds))
             info["状态"] = status
+            # 嵌入基础 cid，供前端与已选课程清单按 cid 关联退课参数
+            info["cid"] = cid
 
             option = CourseOption(
                 course_id=f"{cid}_{info.get('课序号', '')}",
@@ -298,7 +477,7 @@ class CourseService:
             # 提取选课参数
             if choose_href:
                 cleaned = choose_href.replace(" ", "")
-                m = re.search(r"chooseCourse\((.+)\)", cleaned)
+                m = re.search(r"chooseCourse\((.+?)\)", cleaned)
                 if m:
                     args = [a.strip("'") for a in m.group(1).split("','")]
                     if len(args) >= 6:
@@ -308,14 +487,14 @@ class CourseService:
             # 提取退课参数 removeTask(chooserId, courseId, courseIdx, termId, taskType, taskId, hash)
             if remove_href:
                 cleaned = remove_href.replace(" ", "")
-                m = re.search(r"removeTask\((.+)\)", cleaned)
+                m = re.search(r"removeTask\((.+?)\)", cleaned)
                 if m:
                     args = [a.strip("'") for a in m.group(1).split("','")]
                     if len(args) >= 1:
                         option.raw["chooser_id"] = args[0]
                         option.raw["cancel_args"] = args
 
-            # 解析上课时间（如 "周一第二讲"）
+            # 解析上课时间（如 "周一第1-2节{1-16周}"）
             time_str = info.get("上课时间", "")
             option.time_slots = CourseService._parse_time_str(time_str)
             if option.time_slots:
@@ -332,22 +511,124 @@ class CourseService:
         return options
 
     @staticmethod
+    def _parse_choosen_table(html: str) -> list[dict[str, Any]]:
+        """解析列表页内嵌的已选课程清单（div#Choosen → #choosenTable → tr.editRows）。
+
+        每行 10 列：[序号, 教学班, 任课教师, 学分, 修读方式, 课程性质, 重修, 选课轮次, 选课时间, 操作]。
+        操作列两种形态（2026-08-28 实测 sportTask 列表页）：
+          可退: <a title="撤销课程" class="stat delete"
+                 href="javascript:removeTask('SCC','CID','CIDX','TID','TT','TSK','ST');"></a>
+          锁定: <span title="该选课记录禁止修改" class="stat locked"></span>
+        教学班列形如 "编译原理.-.(003)" / "大学体育5——篮球俱乐部.-.(T17)"。
+        chooserId 形如 "5120246728,121387,261T"（学号+cid+termId+taskType）。
+        """
+        sel = Selector(text=html)
+        container = sel.css("#Choosen")
+        if not container:
+            return []
+        items: list[dict[str, Any]] = []
+        for row in container.css("tr.editRows"):
+            tds = [(td.xpath("string()").get() or "").strip() for td in row.css("td")]
+            remove_href = row.css("a.stat.delete::attr(href)").get() or ""
+            locked = bool(row.css("span.stat.locked"))
+
+            name_raw = tds[1] if len(tds) > 1 else ""
+            nm = re.match(r"(.*)\.-\.\(([^()]*)\)\s*$", name_raw)
+            name, class_idx = (nm.group(1).strip(), nm.group(2)) if nm else (name_raw, "")
+
+            item: dict[str, Any] = {
+                "name": name,
+                "class_name": class_idx,
+                "teacher": tds[2] if len(tds) > 2 else "",
+                "credit": tds[3] if len(tds) > 3 else "",
+                "nature": tds[5] if len(tds) > 5 else "",
+                "round": tds[7] if len(tds) > 7 else "",
+                "choose_time": tds[8] if len(tds) > 8 else "",
+                "locked": locked,
+                "cid": "",
+                "chooser_id": "",
+                "course_id": "",
+            }
+            if remove_href:
+                cleaned = remove_href.replace(" ", "")
+                m = re.search(r"removeTask\((.+?)\)", cleaned)
+                if m:
+                    args = [a.strip("'") for a in m.group(1).split("','")]
+                    if len(args) >= 7:
+                        scc, c_id, cidx, tid, tt, tsk, st = args[:7]
+                        item.update(
+                            {
+                                "cid": c_id,
+                                "chooser_id": scc,
+                                # 与选课 course_id 同构：CID|CIDX|TID|TT|TSK|ST
+                                "course_id": "|".join([c_id, cidx, tid, tt, tsk, st]),
+                            }
+                        )
+            items.append(item)
+        return items
+
+    @staticmethod
     def _parse_time_str(text: str) -> list[ClassTimeSlot]:
-        """解析形如 '周一第1-2节{1-16周}' 的时间字符串。"""
+        """解析上课时间字符串，兼容实测的三种形态（同段落可混现多段）：
+
+          1. "周一第1-2节{1-16周}"（sportTask，数字节次+花括号周次）
+          2. "周四第四讲" / "周五第三讲-第四讲"（中文数字讲次，讲字可逐个重复）
+          3. "周五第三-第四讲"（区间简写）
+        多段用逗号/分号/空格分隔均可。按"区间优先、单次兜底"的顺序匹配，
+        已被长模式覆盖的文本段不再被短模式重复解析。
+        """
         slots: list[ClassTimeSlot] = []
         day_map = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "日": 7, "天": 7}
-        for m in re.finditer(r"周(.)第(\d+)-(\d+)节\{(\d+)-(\d+)周\}", text):
-            day = day_map.get(m.group(1))
-            if not day:
-                continue
-            slots.append(
-                ClassTimeSlot(
-                    day_of_week=day,
-                    start_node=int(m.group(2)),
-                    end_node=int(m.group(3)),
-                    weeks=list(range(int(m.group(4)), int(m.group(5)) + 1)),
-                )
-            )
+        cn = "[一二两三四五六七八九十]"
+        num = rf"(?:{cn}+|\d+)"
+
+        patterns: list[tuple[re.Pattern[str], str]] = [
+            (re.compile(r"周(.)第(\d+)-(\d+)节(?:\{(\d+)-(\d+)周\})?"), "node_range"),
+            (re.compile(rf"周(.)第({num})(?:讲|节)-第?({num})(?:讲|节)"), "cn_range"),
+            (re.compile(rf"周(.)第({num})-({num})(?:讲|节)"), "cn_range"),
+            (re.compile(rf"周(.)第({num})(?:讲|节)"), "cn_single"),
+        ]
+
+        claimed: list[tuple[int, int]] = []
+
+        def overlaps(start: int, end: int) -> bool:
+            return any(start < ce and cs < end for cs, ce in claimed)
+
+        for pattern, kind in patterns:
+            for m in pattern.finditer(text):
+                if overlaps(m.start(), m.end()):
+                    continue
+                claimed.append((m.start(), m.end()))
+                day = day_map.get(m.group(1))
+                if not day:
+                    continue
+                if kind == "node_range":
+                    weeks = (
+                        list(range(int(m.group(4)), int(m.group(5)) + 1))
+                        if m.group(4) and m.group(5)
+                        else []
+                    )
+                    slots.append(
+                        ClassTimeSlot(
+                            day_of_week=day,
+                            start_node=int(m.group(2)),
+                            end_node=int(m.group(3)),
+                            weeks=weeks,
+                        )
+                    )
+                else:
+                    start = _cn_to_int(m.group(2))
+                    if start is None:
+                        continue
+                    end = _cn_to_int(m.group(3)) if kind == "cn_range" else start
+                    slots.append(
+                        ClassTimeSlot(
+                            day_of_week=day,
+                            start_node=start,
+                            end_node=end if end is not None else start,
+                            weeks=[],
+                        )
+                    )
         return slots
 
 

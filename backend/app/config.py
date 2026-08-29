@@ -10,7 +10,9 @@ class Settings(BaseSettings):
 
     frontend_origin: str = "http://localhost:5173"
 
-    cookie_ttl_seconds: int = 30 * 60
+    # 本地登录态有效期（秒）。暂时关闭过期：0 = 不限时（原值 30*60，需要时恢复注释即可）
+    # cookie_ttl_seconds: int = 30 * 60
+    cookie_ttl_seconds: int = 0
     cookie_store_dir: Path = Path(__file__).resolve().parent.parent / "data" / "cookies"
 
     session_ttl_seconds: int = 30 * 60
@@ -39,6 +41,16 @@ class Settings(BaseSettings):
 
     swust_qrcode_poll_interval: float = 1.5
     swust_qrcode_timeout: int = 120
+
+    # 登录态 httpx cookie jar 持久化路径（--reload/重启后恢复，避免重新扫码）
+    auth_jar_path: Path = Path(__file__).resolve().parent.parent / "data" / "auth_jar.json"
+
+    # 教学班详情并行抓取。实测教务系统（老 CFM）对同一 session 的请求近似串行加锁，
+    # 并发过高只会加深排队、触发超时重试，反而更慢；6 并发 + 30s 超时实测稳定。
+    fetch_concurrency: int = 6
+    fetch_max_attempts: int = 3
+    fetch_retry_delay: float = 0.6
+    fetch_detail_timeout: float = 30.0
 
     http_timeout: float = 15.0
     http_max_retries: int = 3
