@@ -180,6 +180,49 @@ def test_captures() -> None:
     check("commonTask 课程数=179", len(gcourses) == 179, f"got {len(gcourses)}")
 
 
+def test_paused_vs_expired() -> None:
+    """选课服务暂停 vs 会话失效 的判别逻辑。"""
+    import asyncio
+
+    from app.services.course_service import ServicePausedError, SessionExpiredError
+
+    _p("会话失效 vs 选课服务暂停判别")
+    svc = CourseService()
+
+    class FakeResp:
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+    check("CAS 登录页识别", svc._looks_like_login_page(FakeResp("https://cas.swust.edu.cn/authserver/login?service=x")))
+    check("matrix 页面不误判", not svc._looks_like_login_page(
+        FakeResp("https://matrix.dean.swust.edu.cn/acadmicManager/index.cfm?event=chooseCourse:sportTask&CT=2")))
+
+    async def alive(session_id: str) -> bool:
+        return True
+
+    async def dead(session_id: str) -> bool:
+        return False
+
+    resp = FakeResp("https://cas.swust.edu.cn/authserver/login?service=x")
+    svc._portal_alive = alive  # type: ignore[method-assign]
+    try:
+        asyncio.run(svc._raise_for_course_access("s", resp))
+        check("门户存活→ServicePaused", False, "未抛出异常")
+    except ServicePausedError:
+        check("门户存活→ServicePaused", True)
+    except Exception as e:
+        check("门户存活→ServicePaused", False, repr(e))
+
+    svc._portal_alive = dead  # type: ignore[method-assign]
+    try:
+        asyncio.run(svc._raise_for_course_access("s", resp))
+        check("门户失效→SessionExpired", False, "未抛出异常")
+    except SessionExpiredError:
+        check("门户失效→SessionExpired", True)
+    except Exception as e:
+        check("门户失效→SessionExpired", False, repr(e))
+
+
 def test_time_parser() -> None:
     _p("_parse_time_str 格式兼容")
     parse = CourseService._parse_time_str
@@ -196,6 +239,7 @@ def test_time_parser() -> None:
 
 
 if __name__ == "__main__":
+    test_paused_vs_expired()
     test_time_parser()
     test_choosen_table_fixture()
     test_course_list_fixture()

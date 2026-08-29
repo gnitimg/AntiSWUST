@@ -13,7 +13,7 @@ from typing import Any
 
 from app.config import settings
 from app.models.course import CourseCategory, CourseOption
-from app.services.course_service import SessionExpiredError, _cn_to_int, course_service
+from app.services.course_service import ServicePausedError, SessionExpiredError, _cn_to_int, course_service
 
 # 预置选课：用户提前导入/录入意向课程（CSV 或手动，主要体育项目），选课开始后
 # 自动在真实课程列表中匹配（课程名+教师+课序号+校区+时间），并按优先级提交选课。
@@ -337,6 +337,13 @@ class PresetService:
                     return
                 except asyncio.CancelledError:
                     raise
+                except ServicePausedError as e:
+                    # 选课服务暂停/未开放：跳过本轮匹配提交，间歇后重试（开放后自动继续）
+                    run["error"] = f"{e}（开放后将自动继续提交）"
+                    if not run["retry"]:
+                        break
+                    await asyncio.sleep(run["interval"])
+                    continue
                 except Exception as e:
                     run["error"] = f"抓取课程失败: {type(e).__name__}: {e}"
                     if not run["retry"]:
@@ -345,6 +352,8 @@ class PresetService:
                     continue
 
                 await self._cycle(run, options_by_cat)
+                if run["status"] != "running":
+                    return
 
                 remaining = [
                     r for r in run["results"].values()
@@ -419,6 +428,11 @@ class PresetService:
                 run["error"] = str(e)
                 run["status"] = "error"
                 return
+            except ServicePausedError as e:
+                result["status"] = "submitted"
+                result["message"] = str(e)
+                run["error"] = f"{e}（开放后将自动继续提交）"
+                continue
             except Exception as e:
                 result["status"] = "failed"
                 result["message"] = f"{type(e).__name__}: {e}"

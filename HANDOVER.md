@@ -214,6 +214,9 @@ python3 run.py        # 后端 http://127.0.0.1:8000 + 前端 http://localhost:5
 - **HTTPS 证书**：后端已设 `verify=False`（matrix 证书链不完全受信任）。
 - **网络要求**：cas/matrix 仅校内网或 atrust VPN 可达；matrix 门户页渲染极慢（>15s），登录流程已做容错。
 - **httpx AsyncClient 不可用**：atrust 下 async TLS 握手失败，必须同步 Client + `asyncio.to_thread`。
+- **选课服务暂停时**：chooseCourse 页面会被 302 到 CAS，后端用学生门户首页判别会话真伪——
+  门户能打开 → 503「选课服务当前暂停或未开放」（前端不登出，页面显示提示；预置选课运行器会持续重试，
+  开放后自动继续提交）；门户也打不开 → 401 会话失效正常登出
 - **CFM 会话锁**：教务系统对同一会话的请求近似串行，多页面/多实例并发会互相排队（超时重试可恢复，但会拖慢）。
 - **ST 哈希时效**：选课参数里的 ST 随页面渲染变化，抢课任务每 5 分钟自动重抓；手动选课用列表页最新数据。
 - **parsel 注意**：`td::text` 不含嵌套 span 文本，用 `td.xpath("string()")`；`SelectorList.attrib` 不可靠，用 `::attr(name)`。

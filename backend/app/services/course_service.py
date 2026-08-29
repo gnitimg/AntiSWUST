@@ -14,7 +14,15 @@ from app.models.course import ClassTimeSlot, CourseCategory, CourseOption
 
 
 class SessionExpiredError(RuntimeError):
-    """教务系统会话失效（请求被 302 重定向到 CAS 登录页）。"""
+    """教务系统会话失效（请求被 302 重定向到 CAS 登录页，且门户首页也验证失败）。"""
+
+
+class ServicePausedError(RuntimeError):
+    """选课服务暂停/未开放（会话有效，但 chooseCourse 模块把请求踢回 CAS 登录页）。
+
+    用不依赖选课模块的学生门户首页判别：门户能打开 → 会话有效 → 服务暂停，
+    此时不应返回 401 导致前端误登出。
+    """
 
 
 # 真实选课接口映射（2026-08-28 实测，来源：Chrome DevTools Protocol 抓取五个分类列表页 JS）
@@ -106,11 +114,27 @@ class CourseService:
         return CATEGORY_CT_OVERRIDE.get(category, settings.choose_course_ct)
 
     @staticmethod
-    def _ensure_not_login_page(resp: Any) -> None:
+    def _looks_like_login_page(resp: Any) -> bool:
         """教务 session 失效时请求会被 302 到 CAS 登录页（follow_redirects 后 resp.url 变为 cas）。"""
         url = str(getattr(resp, "url", ""))
-        if "authserver/login" in url or ("cas.swust.edu.cn" in url and "matrix.dean" not in url):
-            raise SessionExpiredError("教务系统会话已失效，请重新登录")
+        return "authserver/login" in url or ("cas.swust.edu.cn" in url and "matrix.dean" not in url)
+
+    async def _portal_alive(self, session_id: str) -> bool:
+        """用学生门户首页（不依赖选课模块）校验会话是否真的有效。"""
+        try:
+            portal_url = f"{settings.swust_dean_base_url}?event={settings.swust_dean_portal_event}"
+            resp = await swust_client.get(session_id, portal_url)
+            return not self._looks_like_login_page(resp)
+        except Exception:
+            return False
+
+    async def _raise_for_course_access(self, session_id: str, resp: Any) -> None:
+        """选课页被踢到 CAS 时，区分「会话真失效」与「选课服务暂停/未开放」。"""
+        if not self._looks_like_login_page(resp):
+            return
+        if await self._portal_alive(session_id):
+            raise ServicePausedError("选课服务当前暂停或未开放，请稍后再试")
+        raise SessionExpiredError("教务系统会话已失效，请重新登录")
 
     def invalidate(self, session_id: str) -> None:
         """选课/退课提交后清除该 session 的全部缓存，下次抓取拿到最新状态。"""
@@ -149,7 +173,7 @@ class CourseService:
                     await asyncio.sleep(0.8)
         if resp is None:
             raise last_err if last_err is not None else RuntimeError("列表页请求失败")
-        self._ensure_not_login_page(resp)
+        await self._raise_for_course_access(session_id, resp)
         tid = self._extract_tid(resp.text)
         # 已选课程清单内嵌在每个列表页中，顺带解析并缓存（退课参数来源）
         if "Choosen" in resp.text:
@@ -224,7 +248,7 @@ class CourseService:
             url = f"{settings.swust_dean_base_url}?event=chooseCourse:{task['task_type']}&CT={self._ct(category)}"
             try:
                 resp = await swust_client.get(session_id, url)
-                self._ensure_not_login_page(resp)
+                await self._raise_for_course_access(session_id, resp)
             except SessionExpiredError:
                 raise
             except Exception as e:
@@ -258,7 +282,7 @@ class CourseService:
             headers=CHOOSE_HEADERS,
             timeout=settings.fetch_detail_timeout,
         )
-        self._ensure_not_login_page(resp)
+        await self._raise_for_course_access(session_id, resp)
         return self._parse_class_table(resp.text, category, cid, course_name, course_credit, is_checked)
 
     async def select(
@@ -291,6 +315,7 @@ class CourseService:
             data=data,
             headers=CHOOSE_HEADERS,
         )
+        await self._raise_for_course_access(session_id, resp)
         try:
             result = resp.json()
         except Exception:
@@ -333,6 +358,7 @@ class CourseService:
             data=data,
             headers=CHOOSE_HEADERS,
         )
+        await self._raise_for_course_access(session_id, resp)
         try:
             result = resp.json()
         except Exception:

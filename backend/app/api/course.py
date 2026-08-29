@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.core.cookie_store import cookie_store
 from app.models.course import CancelCourseRequest, CourseCategory, CourseFilter, SelectCourseRequest
-from app.services.course_service import SessionExpiredError, course_service
+from app.services.course_service import ServicePausedError, SessionExpiredError, course_service
 from app.services.filter_service import filter_service
 
 router = APIRouter(prefix="/api/course", tags=["course"])
@@ -42,6 +42,8 @@ async def list_courses(
         return {cat.value: [i.model_dump() for i in items] for cat, items in grouped.items()}
     except SessionExpiredError as e:
         raise HTTPException(status_code=401, detail=str(e))
+    except ServicePausedError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.get("/selected")
@@ -53,6 +55,8 @@ async def selected_courses(session_id: str, force: bool = False) -> dict:
         return {"items": items}
     except SessionExpiredError as e:
         raise HTTPException(status_code=401, detail=str(e))
+    except ServicePausedError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/filter")
@@ -62,6 +66,8 @@ async def filter_courses(session_id: str, category: CourseCategory, flt: CourseF
         items = await course_service.fetch_category(session_id, category)
     except SessionExpiredError as e:
         raise HTTPException(status_code=401, detail=str(e))
+    except ServicePausedError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     matched = filter_service.apply(items, flt)
     return {"category": category.value, "total": len(matched), "items": [i.model_dump() for i in matched]}
 
@@ -73,6 +79,8 @@ async def select_course(session_id: str, req: SelectCourseRequest) -> dict:
         return await course_service.select(session_id, req.course_id, req.category, req.weeks)
     except SessionExpiredError as e:
         raise HTTPException(status_code=401, detail=str(e))
+    except ServicePausedError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/cancel")
@@ -82,3 +90,5 @@ async def cancel_course(session_id: str, req: CancelCourseRequest) -> dict:
         return await course_service.cancel(session_id, req.course_id, req.category, req.chooser_id)
     except SessionExpiredError as e:
         raise HTTPException(status_code=401, detail=str(e))
+    except ServicePausedError as e:
+        raise HTTPException(status_code=503, detail=str(e))
