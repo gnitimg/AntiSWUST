@@ -140,6 +140,7 @@ export const constantRoutes: RouteRecordRaw[] = [
         name: "MyCoursesIndex",
         meta: {
           title: "我的选课",
+          elIcon: "Tickets",
           keepAlive: true
         }
       }

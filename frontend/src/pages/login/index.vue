@@ -1,6 +1,5 @@
 <script lang="ts" setup>
 import { getQrcodeApi, pollStatusApi } from "@@/apis/login"
-import ThemeSwitch from "@@/components/ThemeSwitch/index.vue"
 import { useUserStore } from "@/pinia/stores/user"
 
 defineOptions({ name: "Login" })
@@ -110,7 +109,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="login-container">
-    <ThemeSwitch class="theme-switch" />
     <el-card class="login-card" shadow="always">
       <div class="title">
         <h2>AntiSWUST 教务辅助系统</h2>
@@ -189,12 +187,6 @@ onBeforeUnmount(() => {
   min-height: 100vh;
   background: linear-gradient(135deg, #1f2d3d 0%, #2b4a6f 50%, #3a7bd5 100%);
 
-  .theme-switch {
-    position: fixed;
-    top: 5%;
-    right: 5%;
-    cursor: pointer;
-  }
 
   .login-card {
     width: 400px;

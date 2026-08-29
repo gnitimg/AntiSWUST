@@ -1,7 +1,6 @@
 <script lang="ts" setup>
 import Screenfull from "@@/components/Screenfull/index.vue"
 import SearchMenu from "@@/components/SearchMenu/index.vue"
-import ThemeSwitch from "@@/components/ThemeSwitch/index.vue"
 import { useDevice } from "@@/composables/useDevice"
 import { useLayoutMode } from "@@/composables/useLayoutMode"
 import { UserFilled } from "@element-plus/icons-vue"
@@ -22,7 +21,7 @@ const userStore = useUserStore()
 
 const settingsStore = useSettingsStore()
 
-const { showThemeSwitch, showScreenfull, showSearchMenu } = storeToRefs(settingsStore)
+const { showScreenfull, showSearchMenu } = storeToRefs(settingsStore)
 
 /** 切换侧边栏 */
 function toggleSidebar() {
@@ -43,7 +42,6 @@ function toggleSidebar() {
     <div class="right-menu">
       <SearchMenu v-if="showSearchMenu" class="right-menu-item" />
       <Screenfull v-if="showScreenfull" class="right-menu-item" />
-      <ThemeSwitch v-if="showThemeSwitch" class="right-menu-item" />
       <el-dropdown>
         <div class="right-menu-item user">
           <el-avatar :icon="UserFilled" :size="30" />

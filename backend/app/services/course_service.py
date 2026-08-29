@@ -92,6 +92,9 @@ def _cn_to_int(text: str) -> int | None:
         return tens * 10 + ones
     return _CN_DIGITS.get(text)
 
+# 教务系统网络层不可达时的统一提示
+NET_UNAVAILABLE_MSG = "教务系统暂时无法访问（服务可能已暂停或网络异常），请稍后再试"
+
 # fetch_selected 依次尝试的分类（任一列表页都内嵌同一份已选清单，从小页到大页）
 SELECTED_FETCH_ORDER = (
     CourseCategory.SUPPLEMENT,
@@ -176,8 +179,9 @@ class CourseService:
             try:
                 resp = await swust_client.get(session_id, list_url)
                 break
-            except httpx.HTTPError as e:
-                last_err = e
+            except httpx.HTTPError:
+                # 教务在网络层拒绝/超时（服务暂停时常见），按服务不可用处理而非 500
+                last_err = ServicePausedError("%s" % NET_UNAVAILABLE_MSG)
                 if attempt == 0:
                     await asyncio.sleep(0.8)
         if resp is None:
@@ -260,6 +264,9 @@ class CourseService:
                 await self._raise_for_course_access(session_id, resp)
             except SessionExpiredError:
                 raise
+            except httpx.HTTPError:
+                last_err = ServicePausedError("%s" % NET_UNAVAILABLE_MSG)
+                continue
             except Exception as e:
                 last_err = e
                 continue
@@ -317,13 +324,16 @@ class CourseService:
         # fixupTask/retakeTask 需 CP（课程性质，从 course_id 编码第 7 段或 prop 取）
         if category in (CourseCategory.SUPPLEMENT, CourseCategory.RETAKE) and len(parts) >= 7:
             data["CP"] = parts[6]
-        resp = await swust_client.post(
-            session_id,
-            settings.swust_dean_base_url,
-            params={"event": f"chooseCourse:{task['choose_api']}"},
-            data=data,
-            headers=CHOOSE_HEADERS,
-        )
+        try:
+            resp = await swust_client.post(
+                session_id,
+                settings.swust_dean_base_url,
+                params={"event": f"chooseCourse:{task['choose_api']}"},
+                data=data,
+                headers=CHOOSE_HEADERS,
+            )
+        except httpx.HTTPError:
+            raise ServicePausedError("%s" % NET_UNAVAILABLE_MSG)
         await self._raise_for_course_access(session_id, resp)
         try:
             result = resp.json()
@@ -360,13 +370,16 @@ class CourseService:
             "SCC": chooser_id,
             "seed": int(time.time() * 1000),
         }
-        resp = await swust_client.post(
-            session_id,
-            settings.swust_dean_base_url,
-            params={"event": f"chooseCourse:{CANCEL_API}"},
-            data=data,
-            headers=CHOOSE_HEADERS,
-        )
+        try:
+            resp = await swust_client.post(
+                session_id,
+                settings.swust_dean_base_url,
+                params={"event": f"chooseCourse:{CANCEL_API}"},
+                data=data,
+                headers=CHOOSE_HEADERS,
+            )
+        except httpx.HTTPError:
+            raise ServicePausedError("%s" % NET_UNAVAILABLE_MSG)
         await self._raise_for_course_access(session_id, resp)
         try:
             result = resp.json()
