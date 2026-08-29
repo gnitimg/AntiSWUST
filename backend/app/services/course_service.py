@@ -119,22 +119,31 @@ class CourseService:
         url = str(getattr(resp, "url", ""))
         return "authserver/login" in url or ("cas.swust.edu.cn" in url and "matrix.dean" not in url)
 
-    async def _portal_alive(self, session_id: str) -> bool:
-        """用学生门户首页（不依赖选课模块）校验会话是否真的有效。"""
+    async def _portal_check(self, session_id: str) -> tuple[bool, str]:
+        """用学生门户首页（不依赖选课模块）探测会话状态。
+
+        返回 (存活, 备注)："alive"=门户正常打开；"dead"=门户也被踢到 CAS；
+        "error"=门户请求本身失败（超时/连接错误，系统可能整体不可用）。
+        """
         try:
             portal_url = f"{settings.swust_dean_base_url}?event={settings.swust_dean_portal_event}"
             resp = await swust_client.get(session_id, portal_url)
-            return not self._looks_like_login_page(resp)
+            return (True, "alive") if not self._looks_like_login_page(resp) else (False, "dead")
         except Exception:
-            return False
+            return False, "error"
 
     async def _raise_for_course_access(self, session_id: str, resp: Any) -> None:
-        """选课页被踢到 CAS 时，区分「会话真失效」与「选课服务暂停/未开放」。"""
+        """选课页被踢到 CAS 时，区分「选课模块暂停」「系统整体不可用」「会话真失效」。"""
         if not self._looks_like_login_page(resp):
             return
-        if await self._portal_alive(session_id):
+        alive, note = await self._portal_check(session_id)
+        if alive:
             raise ServicePausedError("选课服务当前暂停或未开放，请稍后再试")
-        raise SessionExpiredError("教务系统会话已失效，请重新登录")
+        if note == "error":
+            raise ServicePausedError("教务系统暂时无法访问，请稍后再试")
+        # 门户也被踢到 CAS：会话失效与系统整体维护两种情况无法进一步区分，
+        # 提示语兼顾两者；前端对该 401 只提示不自动登出
+        raise SessionExpiredError("教务系统会话已失效或系统维护中，请稍后重试或重新扫码登录")
 
     def invalidate(self, session_id: str) -> None:
         """选课/退课提交后清除该 session 的全部缓存，下次抓取拿到最新状态。"""

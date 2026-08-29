@@ -331,7 +331,14 @@ class PresetService:
                             run["session_id"], cat, force=True
                         )
                     run["error"] = ""
+                    run["fetched_once"] = True
                 except SessionExpiredError:
+                    # 尚未成功抓取过任何数据（如开放前系统整体维护）→ 持续重试；
+                    # 已成功运行过则按会话失效终止，提示重新登录
+                    if not run.get("fetched_once") and run["retry"]:
+                        run["error"] = "教务系统未开放或会话失效，将持续重试"
+                        await asyncio.sleep(run["interval"])
+                        continue
                     run["error"] = "教务会话已失效，请重新登录"
                     run["status"] = "error"
                     return

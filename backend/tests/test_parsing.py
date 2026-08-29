@@ -197,14 +197,17 @@ def test_paused_vs_expired() -> None:
     check("matrix 页面不误判", not svc._looks_like_login_page(
         FakeResp("https://matrix.dean.swust.edu.cn/acadmicManager/index.cfm?event=chooseCourse:sportTask&CT=2")))
 
-    async def alive(session_id: str) -> bool:
-        return True
+    async def alive(session_id: str) -> tuple[bool, str]:
+        return True, "alive"
 
-    async def dead(session_id: str) -> bool:
-        return False
+    async def dead(session_id: str) -> tuple[bool, str]:
+        return False, "dead"
+
+    async def err(session_id: str) -> tuple[bool, str]:
+        return False, "error"
 
     resp = FakeResp("https://cas.swust.edu.cn/authserver/login?service=x")
-    svc._portal_alive = alive  # type: ignore[method-assign]
+    svc._portal_check = alive  # type: ignore[method-assign]
     try:
         asyncio.run(svc._raise_for_course_access("s", resp))
         check("门户存活→ServicePaused", False, "未抛出异常")
@@ -213,14 +216,23 @@ def test_paused_vs_expired() -> None:
     except Exception as e:
         check("门户存活→ServicePaused", False, repr(e))
 
-    svc._portal_alive = dead  # type: ignore[method-assign]
+    svc._portal_check = err  # type: ignore[method-assign]
     try:
         asyncio.run(svc._raise_for_course_access("s", resp))
-        check("门户失效→SessionExpired", False, "未抛出异常")
-    except SessionExpiredError:
-        check("门户失效→SessionExpired", True)
+        check("门户请求失败→ServicePaused(系统不可达)", False, "未抛出异常")
+    except ServicePausedError:
+        check("门户请求失败→ServicePaused(系统不可达)", True)
     except Exception as e:
-        check("门户失效→SessionExpired", False, repr(e))
+        check("门户请求失败→ServicePaused(系统不可达)", False, repr(e))
+
+    svc._portal_check = dead  # type: ignore[method-assign]
+    try:
+        asyncio.run(svc._raise_for_course_access("s", resp))
+        check("门户被踢CAS→SessionExpired", False, "未抛出异常")
+    except SessionExpiredError:
+        check("门户被踢CAS→SessionExpired", True)
+    except Exception as e:
+        check("门户被踢CAS→SessionExpired", False, repr(e))
 
 
 def test_time_parser() -> None:
