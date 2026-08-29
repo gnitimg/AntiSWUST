@@ -21,15 +21,72 @@ const stage = ref<"idle" | "basic" | "basic-done" | "full" | "error">("idle")
 const fullError = ref("")
 const refreshing = ref(false)
 
-/** 筛选条件（前端实时过滤，无需点按钮） */
+/** 筛选条件（前端实时过滤，多选字段为"或"关系，字段之间"且"关系） */
 const filter = reactive({
   name: "",
-  teacher: "",
-  campus: "",
-  day_of_week: undefined as number | undefined,
-  node: undefined as number | undefined,
-  only_available: false,
-  groupId: ""
+  campus: [] as string[],
+  teacher: [] as string[],
+  day_of_week: [] as number[],
+  node: [] as number[],
+  weeks: [] as number[],
+  groupId: [] as string[],
+  only_available: false
+})
+
+/** 重置筛选（切换分类时选项会随数据变化） */
+function resetFilter() {
+  filter.name = ""
+  filter.campus = []
+  filter.teacher = []
+  filter.day_of_week = []
+  filter.node = []
+  filter.weeks = []
+  filter.groupId = []
+  filter.only_available = false
+}
+
+/** 下拉选项全部从已加载的课程数据中动态生成 */
+const FIXED_CAMPUSES = ["新区", "老区", "西山"]
+
+const campusOptions = computed(() => {
+  const set = new Set<string>(FIXED_CAMPUSES)
+  for (const it of items.value) {
+    const c = String(it.campus || it.raw?.["校区"] || "").trim()
+    if (c) set.add(c)
+  }
+  return [...set]
+})
+
+const teacherOptions = computed(() => {
+  const set = new Set<string>()
+  for (const it of items.value) {
+    const t = String(it.teacher || it.raw?.["教师"] || "").trim()
+    // 一行可能含多名教师（逗号/顿号分隔），拆开作为选项
+    for (const part of t.split(/[,，、/]/)) {
+      const v = part.trim()
+      if (v) set.add(v)
+    }
+  }
+  return [...set].sort((a, b) => a.localeCompare(b, "zh"))
+})
+
+const dayOptions = computed(() => {
+  const set = new Set<number>()
+  for (const it of items.value) for (const s of it.time_slots ?? []) set.add(s.day_of_week)
+  return [...set].sort((a, b) => a - b)
+})
+
+const nodeOptions = computed(() => {
+  const set = new Set<number>()
+  for (const it of items.value)
+    for (const s of it.time_slots ?? []) for (let n = s.start_node; n <= s.end_node; n++) set.add(n)
+  return [...set].sort((a, b) => a - b)
+})
+
+const weekOptions = computed(() => {
+  const set = new Set<number>()
+  for (const it of items.value) for (const w of it.weeks_available ?? []) set.add(w)
+  return [...set].sort((a, b) => a - b)
 })
 
 /** 默认抢课参数（localStorage 持久化，抢课弹窗读取） */
@@ -39,21 +96,22 @@ const snipeDefaults = reactive({
 })
 
 const filteredItems = computed(() => {
+  const groupCids = new Set(filter.groupId.flatMap(gid => courseStore.groupCids(gid)))
   return items.value.filter((c: CourseOption) => {
     if (filter.only_available && c.capacity - c.selected_count <= 0) return false
     if (filter.name && !c.name.includes(filter.name.trim())) return false
-    if (filter.teacher && !c.teacher.includes(filter.teacher.trim())) return false
-    if (filter.campus && !c.campus.includes(filter.campus.trim())) return false
-    if (filter.day_of_week !== undefined) {
-      if (!c.time_slots?.some((s: { day_of_week: number }) => s.day_of_week === filter.day_of_week)) return false
+    if (filter.campus.length) {
+      const campus = String(c.campus || c.raw?.["校区"] || "").trim()
+      if (!filter.campus.some(sel => campus.includes(sel))) return false
     }
-    if (filter.node !== undefined) {
-      if (!c.time_slots?.some((s: { start_node: number, end_node: number }) => s.start_node <= filter.node! && filter.node! <= s.end_node)) return false
+    if (filter.teacher.length) {
+      const teacher = String(c.teacher || c.raw?.["教师"] || "")
+      if (!filter.teacher.some(sel => teacher.includes(sel))) return false
     }
-    if (filter.groupId) {
-      const cids = courseStore.groupCids(filter.groupId)
-      if (cids.length && !cids.includes(String(c.raw?.cid ?? ""))) return false
-    }
+    if (filter.day_of_week.length && !c.time_slots?.some(s => filter.day_of_week.includes(s.day_of_week))) return false
+    if (filter.node.length && !c.time_slots?.some(s => filter.node.some(n => s.start_node <= n && n <= s.end_node))) return false
+    if (filter.weeks.length && !c.weeks_available?.some(w => filter.weeks.includes(w))) return false
+    if (filter.groupId.length && !groupCids.has(String(c.raw?.cid ?? ""))) return false
     return true
   })
 })
@@ -115,6 +173,7 @@ async function refresh() {
 watch(category, () => {
   items.value = []
   stage.value = "idle"
+  resetFilter()
   loadBasic().then(() => loadFull())
 })
 
@@ -247,29 +306,38 @@ async function onAddToGroup(groupId: string, row: CourseOption) {
       <el-alert v-if="stage === 'basic-done'" title="课程列表已就绪，教学班详情（教师/时间/余量）正在后台加载" type="info" show-icon :closable="false" class="mb-3" />
       <el-alert v-if="fullError" :title="`教学班详情加载失败：${fullError}（可点击刷新重试）`" type="error" show-icon :closable="false" class="mb-3" />
 
-      <!-- 筛选栏 -->
+      <!-- 筛选栏（下拉选项均从已加载课程数据中生成） -->
       <el-form inline class="mb-3">
         <el-form-item label="课程名">
-          <el-input v-model="filter.name" clearable placeholder="如 篮球" style="width: 130px" />
-        </el-form-item>
-        <el-form-item label="老师">
-          <el-input v-model="filter.teacher" clearable placeholder="如 A老师" style="width: 120px" />
+          <el-input v-model="filter.name" clearable placeholder="如 篮球" style="width: 120px" />
         </el-form-item>
         <el-form-item label="校区">
-          <el-input v-model="filter.campus" clearable placeholder="如 新区" style="width: 100px" />
+          <el-select v-model="filter.campus" multiple collapse-tags clearable placeholder="不限" style="width: 130px">
+            <el-option v-for="c in campusOptions" :key="c" :label="c" :value="c" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="老师">
+          <el-select v-model="filter.teacher" multiple collapse-tags filterable clearable reserve-keyword placeholder="不限" style="width: 150px">
+            <el-option v-for="t in teacherOptions" :key="t" :label="t" :value="t" />
+          </el-select>
         </el-form-item>
         <el-form-item label="星期">
-          <el-select v-model="filter.day_of_week" clearable placeholder="不限" style="width: 90px">
-            <el-option v-for="(label, i) in WEEKDAY_LABELS" :key="label" :label="label" :value="i + 1" />
+          <el-select v-model="filter.day_of_week" multiple collapse-tags clearable placeholder="不限" style="width: 130px">
+            <el-option v-for="d in dayOptions" :key="d" :label="WEEKDAY_LABELS[d - 1] ?? `周${d}`" :value="d" />
           </el-select>
         </el-form-item>
         <el-form-item label="节次">
-          <el-select v-model="filter.node" clearable placeholder="不限" style="width: 90px">
-            <el-option v-for="i in 13" :key="i" :label="`第${i}节`" :value="i" />
+          <el-select v-model="filter.node" multiple collapse-tags clearable placeholder="不限" style="width: 130px">
+            <el-option v-for="n in nodeOptions" :key="n" :label="`第${n}节`" :value="n" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="周次">
+          <el-select v-model="filter.weeks" multiple collapse-tags filterable clearable placeholder="不限" style="width: 150px">
+            <el-option v-for="w in weekOptions" :key="w" :label="`第${w}周`" :value="w" />
           </el-select>
         </el-form-item>
         <el-form-item label="课程组">
-          <el-select v-model="filter.groupId" clearable placeholder="不限" style="width: 140px">
+          <el-select v-model="filter.groupId" multiple collapse-tags clearable placeholder="不限" style="width: 150px">
             <el-option v-for="g in courseStore.groups" :key="g.id" :label="g.name" :value="g.id" />
           </el-select>
         </el-form-item>
