@@ -10,6 +10,8 @@ import { useSettingsStore } from "@/pinia/stores/settings"
 import { useUserStore } from "@/pinia/stores/user"
 import { Breadcrumb, Hamburger, Sidebar } from "../index"
 
+const router = useRouter()
+
 const { isMobile } = useDevice()
 
 const { isTop } = useLayoutMode()
@@ -49,15 +51,9 @@ function toggleSidebar() {
         </div>
         <template #dropdown>
           <el-dropdown-menu>
-            <a target="_blank" href="https://github.com/un-pany/v3-admin-vite">
-              <el-dropdown-item>GitHub</el-dropdown-item>
-            </a>
-            <a target="_blank" href="https://gitee.com/un-pany/v3-admin-vite">
-              <el-dropdown-item>Gitee</el-dropdown-item>
-            </a>
-            <a target="_blank" href="https://atomgit.com/un-pany/v3-admin-vite">
-              <el-dropdown-item>AtomGit</el-dropdown-item>
-            </a>
+            <el-dropdown-item @click="router.push('/settings')">
+              主题设置
+            </el-dropdown-item>
             <el-dropdown-item divided @click="userStore.logout">
               退出登录
             </el-dropdown-item>

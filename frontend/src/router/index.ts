@@ -51,127 +51,159 @@ export const constantRoutes: RouteRecordRaw[] = [
   },
   {
     path: "/",
+    redirect: DASHBOARD_PATH,
+    meta: {
+      hidden: true
+    }
+  },
+  {
+    path: "/course",
     component: Layouts,
     redirect: DASHBOARD_PATH,
+    name: "CourseAll",
+    meta: {
+      title: "所有选课",
+      elIcon: "Menu",
+      alwaysShow: true
+    },
     children: [
       {
-        path: "course",
-        redirect: "/course/pe",
-        name: "CourseAll",
+        path: "pe",
+        component: CoursePage,
+        name: "CoursePe",
         meta: {
-          title: "所有选课",
-          elIcon: "Menu",
-          alwaysShow: true
-        },
-        children: [
-          {
-            path: "pe",
-            component: CoursePage,
-            name: "CoursePe",
-            meta: {
-              title: "体育项目",
-              elIcon: "Basketball",
-              category: "pe",
-              keepAlive: true
-            }
-          },
-          {
-            path: "general",
-            component: CoursePage,
-            name: "CourseGeneral",
-            meta: {
-              title: "全校通选课",
-              elIcon: "Collection",
-              category: "general",
-              keepAlive: true
-            }
-          },
-          {
-            path: "major-limited",
-            component: CoursePage,
-            name: "CourseMajorLimited",
-            meta: {
-              title: "计划课程",
-              elIcon: "Notebook",
-              category: "major_limited",
-              keepAlive: true
-            }
-          },
-          {
-            path: "supplement",
-            component: CoursePage,
-            name: "CourseSupplement",
-            meta: {
-              title: "补选低年级课程",
-              elIcon: "Reading",
-              category: "supplement",
-              keepAlive: true
-            }
-          },
-          {
-            path: "retake",
-            component: CoursePage,
-            name: "CourseRetake",
-            meta: {
-              title: "重新学习（重修）",
-              elIcon: "RefreshLeft",
-              category: "retake",
-              keepAlive: true
-            }
-          }
-        ]
-      },
-      {
-        path: "my",
-        component: () => import("@/pages/my/index.vue"),
-        name: "MyCourses",
-        meta: {
-          title: "我的选课",
-          elIcon: "Tickets",
+          title: "体育项目",
+          elIcon: "Basketball",
+          category: "pe",
           keepAlive: true
         }
       },
       {
-        path: "lab",
-        redirect: "/lab/snipe",
-        name: "Lab",
+        path: "general",
+        component: CoursePage,
+        name: "CourseGeneral",
         meta: {
-          title: "实验功能",
-          elIcon: "MagicStick",
-          alwaysShow: true
-        },
-        children: [
-          {
-            path: "snipe",
-            component: () => import("@/pages/snipe/index.vue"),
-            name: "Snipe",
-            meta: {
-              title: "抢课",
-              elIcon: "Aim",
-              keepAlive: true
-            }
-          },
-          {
-            path: "preset",
-            component: () => import("@/pages/preset/index.vue"),
-            name: "PresetCourses",
-            meta: {
-              title: "预置选课",
-              elIcon: "AlarmClock",
-              keepAlive: true
-            }
-          },
-          {
-            path: "groups",
-            component: () => import("@/pages/groups/index.vue"),
-            name: "CourseGroups",
-            meta: {
-              title: "课程组",
-              elIcon: "Files",
-              keepAlive: true
-            }
-          }
-        ]
+          title: "全校通选课",
+          elIcon: "Collection",
+          category: "general",
+          keepAlive: true
+        }
+      },
+      {
+        path: "major-limited",
+        component: CoursePage,
+        name: "CourseMajorLimited",
+        meta: {
+          title: "计划课程",
+          elIcon: "Notebook",
+          category: "major_limited",
+          keepAlive: true
+        }
+      },
+      {
+        path: "supplement",
+        component: CoursePage,
+        name: "CourseSupplement",
+        meta: {
+          title: "补选低年级课程",
+          elIcon: "Reading",
+          category: "supplement",
+          keepAlive: true
+        }
+      },
+      {
+        path: "retake",
+        component: CoursePage,
+        name: "CourseRetake",
+        meta: {
+          title: "重新学习（重修）",
+          elIcon: "RefreshLeft",
+          category: "retake",
+          keepAlive: true
+        }
+      }
+    ]
+  },
+  {
+    path: "/my",
+    component: Layouts,
+    redirect: "/my",
+    name: "MyCourses",
+    meta: {
+      title: "我的选课",
+      elIcon: "Tickets"
+    },
+    children: [
+      {
+        path: "",
+        component: () => import("@/pages/my/index.vue"),
+        name: "MyCoursesIndex",
+        meta: {
+          title: "我的选课",
+          keepAlive: true
+        }
+      }
+    ]
+  },
+  {
+    path: "/lab",
+    component: Layouts,
+    redirect: "/lab/snipe",
+    name: "Lab",
+    meta: {
+      title: "实验功能",
+      elIcon: "MagicStick",
+      alwaysShow: true
+    },
+    children: [
+      {
+        path: "snipe",
+        component: () => import("@/pages/snipe/index.vue"),
+        name: "Snipe",
+        meta: {
+          title: "抢课",
+          elIcon: "Aim",
+          keepAlive: true
+        }
+      },
+      {
+        path: "preset",
+        component: () => import("@/pages/preset/index.vue"),
+        name: "PresetCourses",
+        meta: {
+          title: "预置选课",
+          elIcon: "AlarmClock",
+          keepAlive: true
+        }
+      },
+      {
+        path: "groups",
+        component: () => import("@/pages/groups/index.vue"),
+        name: "CourseGroups",
+        meta: {
+          title: "课程组",
+          elIcon: "Files",
+          keepAlive: true
+        }
+      }
+    ]
+  },
+  {
+    path: "/settings",
+    component: Layouts,
+    redirect: "/settings",
+    name: "SettingsRoot",
+    meta: {
+      hidden: true
+    },
+    children: [
+      {
+        path: "",
+        component: () => import("@/pages/settings/index.vue"),
+        name: "ThemeSettings",
+        meta: {
+          title: "主题设置"
+        }
       }
     ]
   }
