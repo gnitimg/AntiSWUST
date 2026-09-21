@@ -28,7 +28,13 @@ class StatusResponse(BaseModel):
 
 @router.get("/qrcode", response_model=QRCodeResponse)
 async def get_qrcode() -> QRCodeResponse:
-    info = await auth_adapter.get_qrcode()
+    try:
+        info = await auth_adapter.get_qrcode()
+    except Exception as e:
+        print(f"[get_qrcode] 获取二维码异常: {type(e).__name__}: {e}", flush=True)
+        raise HTTPException(status_code=503, detail="暂时无法连接微信登录服务，请稍后重试") from e
+    if not info.ticket or not info.image_base64:
+        raise HTTPException(status_code=502, detail="微信登录服务未返回有效二维码，请稍后重试")
     session_id = cookie_store.create_session()
     return QRCodeResponse(
         session_id=session_id,
@@ -40,14 +46,23 @@ async def get_qrcode() -> QRCodeResponse:
 
 @router.get("/status", response_model=StatusResponse)
 async def login_status(session_id: str, ticket: str) -> StatusResponse:
+    # aTrust 切换网卡时浏览器可能丢掉后端已经发出的成功响应；下一次轮询直接恢复结果。
+    existing = cookie_store.load(session_id)
+    if existing is not None:
+        return StatusResponse(
+            status="success",
+            session_id=session_id,
+            user=existing.get("user") or {},
+        )
+
     try:
         result = await auth_adapter.poll_status(ticket)
+        if result.success:
+            cookie_store.save(session_id, result.cookies, result.user)
+            return StatusResponse(status="success", session_id=session_id, user=result.user)
     except Exception as e:
         print(f"[login_status] poll_status 异常: {type(e).__name__}: {e}", flush=True)
         return StatusResponse(status="waiting", session_id=session_id)
-    if result.success:
-        cookie_store.save(session_id, result.cookies, result.user)
-        return StatusResponse(status="success", session_id=session_id, user=result.user)
     if result.message in ("expired", "scanned", "network_error"):
         return StatusResponse(status=result.message, session_id=session_id, detail=result.detail)
     return StatusResponse(status="waiting", session_id=session_id)

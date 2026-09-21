@@ -30,6 +30,43 @@ class SwustClient:
                 "Referer": settings.swust_dean_base_url,
             },
         )
+        # 已用门户首页初始化过 matrix CFM 应用会话的 session（见 prime）
+        self._primed: set[str] = set()
+
+    async def prime(self, session_id: str) -> None:
+        """访问学生门户首页一次，初始化 matrix.dean 的 CFM 应用会话。
+
+        实测：带教务 SSO 冷启动直接请求 chooseCourse 事件，matrix 会返回
+        「应用程序出错」页（HTTP 200 但无课程容器）；先用同一客户端打开门户
+        首页建立应用会话后，选课事件才返回正常内容。每个 session 预热一次。
+        """
+        if session_id not in self._primed:
+            try:
+                portal_url = f"{settings.swust_dean_base_url}?event={settings.swust_dean_portal_event}"
+                await self.get(session_id, portal_url)
+                self._primed.add(session_id)
+            except httpx.HTTPError:
+                pass
+
+    def unprime(self, session_id: str) -> None:
+        """清除预热标记，下次请求重新初始化会话（用于会话失效后重试）。"""
+        self._primed.discard(session_id)
+
+    async def refresh_dean_session(self, session_id: str) -> bool:
+        """教务 SSO 会话短命，过期后 matrix 会把请求踢回 CAS。用 session 里仍有效的
+        CAS TGC 重新走一次 login?service=教务门户，换取新的教务票据并回写教务 cookie。
+
+        返回是否成功拿到教务域 cookie（成功即可重试原请求，无需用户重新扫码）。
+        """
+        dean_service = f"{settings.swust_dean_base_url}?event={settings.swust_dean_portal_event}"
+        try:
+            await self.get(session_id, settings.swust_cas_login_url, params={"service": dean_service})
+        except httpx.HTTPError:
+            return False
+        # 续期后教务域应有新 cookie；重新预热
+        self._primed.discard(session_id)
+        cookies = cookie_store.get_cookies(session_id) or {}
+        return any("dean.swust.edu.cn" in d for d in cookies)
 
     async def aclose(self) -> None:
         await asyncio.to_thread(self._client.close)

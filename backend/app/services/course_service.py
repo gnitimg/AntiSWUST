@@ -137,6 +137,10 @@ class CourseService:
 
     async def _raise_for_course_access(self, session_id: str, resp: Any) -> None:
         """选课页被踢到 CAS 时，区分「选课模块暂停」「系统整体不可用」「会话真失效」。"""
+        # matrix CFM 应用会话未初始化时会返回「应用程序出错」页（HTTP 200 但非登录页），
+        # 属瞬时故障，按服务不可用（503）处理，避免前端误判为会话失效而强制登出。
+        if "应用程序出错" in (getattr(resp, "text", "") or ""):
+            raise ServicePausedError(NET_UNAVAILABLE_MSG)
         if not self._looks_like_login_page(resp):
             return
         alive, note = await self._portal_check(session_id)
@@ -147,6 +151,19 @@ class CourseService:
         # 门户也被踢到 CAS：会话失效与系统整体维护两种情况无法进一步区分，
         # 提示语兼顾两者；前端对该 401 只提示不自动登出
         raise SessionExpiredError("教务系统会话已失效或系统维护中，请稍后重试或重新扫码登录")
+
+    async def _course_get(self, session_id: str, url: str) -> Any:
+        """请求教务选课页；若被踢回 CAS（教务 SSO 过期），用 TGC 静默续期后重试一次。
+
+        这样多数「会话过期」无需用户重新扫码即可自愈。续期后仍被踢才交给
+        _raise_for_course_access 判定为失效/暂停。
+        """
+        resp = await swust_client.get(session_id, url)
+        if self._looks_like_login_page(resp):
+            if await swust_client.refresh_dean_session(session_id):
+                await swust_client.prime(session_id)
+                resp = await swust_client.get(session_id, url)
+        return resp
 
     def invalidate(self, session_id: str) -> None:
         """选课/退课提交后清除该 session 的全部缓存，下次抓取拿到最新状态。"""
@@ -172,12 +189,14 @@ class CourseService:
         task = CATEGORY_TASK[category]
         ct = self._ct(category)
         list_url = f"{settings.swust_dean_base_url}?event=chooseCourse:{task['task_type']}&CT={ct}"
+        # 先预热 matrix 应用会话（否则 chooseCourse 事件返回「应用程序出错」页）
+        await swust_client.prime(session_id)
         # 列表页偶发超时（会话锁排队/网络抖动），重试一次
         resp: httpx.Response | None = None
         last_err: Exception | None = None
         for attempt in range(2):
             try:
-                resp = await swust_client.get(session_id, list_url)
+                resp = await self._course_get(session_id, list_url)
                 break
             except httpx.HTTPError:
                 # 教务在网络层拒绝/超时（服务暂停时常见），按服务不可用处理而非 500
@@ -255,12 +274,14 @@ class CourseService:
         if cached and not force and time.time() - cached[0] < self._cache_ttl:
             return cached[1]
 
+        # 先预热 matrix 应用会话，否则 chooseCourse 事件返回「应用程序出错」页
+        await swust_client.prime(session_id)
         last_err: Exception | None = None
         for category in SELECTED_FETCH_ORDER:
             task = CATEGORY_TASK[category]
             url = f"{settings.swust_dean_base_url}?event=chooseCourse:{task['task_type']}&CT={self._ct(category)}"
             try:
-                resp = await swust_client.get(session_id, url)
+                resp = await self._course_get(session_id, url)
                 await self._raise_for_course_access(session_id, resp)
             except SessionExpiredError:
                 raise

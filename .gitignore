@@ -75,5 +75,6 @@ ehthumbs.db
 # ===== 临时/诊断文件 =====
 _diag.ps1
 _probe_wx.ps1
+artifacts/
 *.tmp
 *.bak
